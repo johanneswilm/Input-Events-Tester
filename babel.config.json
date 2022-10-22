@@ -1,0 +1,19 @@
+{
+  "presets": [
+    [
+      "@babel/preset-env",
+      {
+        "targets": {
+          // min versions where InputEvents were implemented
+          "edge": "79",
+	        "opera": "47",
+          "firefox": "87",
+          "chrome": "60",
+          "safari": "10.1"
+        },
+        "useBuiltIns": "usage",
+        "corejs": "3.25.5"
+      }
+    ]
+  ]
+}
