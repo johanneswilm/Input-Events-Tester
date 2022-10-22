@@ -1,0 +1,66 @@
+/* Test cases */
+div[contenteditable]{
+	border: 1px dotted black;
+	margin: 5px;
+	padding: 5px;
+}
+.b { font-weight: bold; }
+.u { text-decoration: underline; }
+.i { font-style: italic; }
+
+/* Event output log */
+output{
+	display: block;
+	font-family: monospace;
+	white-space: pre;
+	font-size: 90%;
+	padding: 5px;
+	margin: 5px;
+	border: 1px solid blue;
+}
+output ul{
+	margin:2px 0 2px 30px;
+	padding:0;
+}
+output pre{
+	display: inline-block;
+	margin:.05em;
+}
+label{ display: block; }
+
+/* HTML serialzation styles */
+pre{
+	border: 0.1em solid #704E05;
+	margin: 0.5em;
+	padding: 0.2em .5em;
+	background-color: #FFF3DB;
+	white-space: pre-wrap;
+}
+pre .tag{ font-weight: bold; }
+pre .tag_attr{ font-style: italic; }
+pre .text{}
+pre .text::before{
+	content: '#';
+	color: #12B46E;
+	font-weight: bold;
+}
+pre [data-range]::before{
+	color: #7C00F9;
+	font-weight: 900;
+}
+pre [data-range=start]::before{
+	content: '｢';
+}
+pre [data-range=end]::before{
+	content: '｣';
+	vertical-align: -20%;
+}
+pre [data-range=collapsed]::before{
+	content: '|';
+}
+pre span[data-sid]::after{
+	content: attr(data-sid);
+	color: #12B46E;
+	font-size: 70%;
+	vertical-align: sub;
+}
