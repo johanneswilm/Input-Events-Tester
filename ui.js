@@ -1,6 +1,37 @@
-const output = document.querySelector("output");
-const divs = document.querySelectorAll("div");
-const [count, cancel] = document.querySelectorAll("input");
+var output, divs, count, cancel;
+
+document.addEventListener("DOMContentLoaded", () => {
+	output = document.querySelector("output");
+	divs = document.querySelectorAll("div");
+	[count, cancel] = document.querySelectorAll("input");
+
+	// Initialize
+	document.addEventListener("selectionchange", (e) => {
+		let div = document.activeElement;
+		/* console.log(div); */
+		if (div.contentEditable == "true")
+			serialize_current(div);
+		log(`<b>${e.type}</b>`);
+	});
+	divs.forEach((div, idx) => {
+		// setup serialization
+		trim_whitespace(div);
+		div.after(document.createElement("pre"));
+		serialize_current(div);
+
+		// events
+		div.addEventListener("compositionstart", evt_msg);
+		div.addEventListener("compositionupdate", evt_msg);
+		div.addEventListener("compositionend", evt_msg);
+		div.addEventListener("beforeinput", e => {
+			if (cancel.checked)
+				e.preventDefault();
+			evt_msg(e);
+		});
+		div.addEventListener("input", evt_msg);
+	});
+
+});
 
 // Keep a log of last N events, in reverse temporal order
 function log(html) {
@@ -242,29 +273,3 @@ function serialize_current(div){
 	new HTMLSerialize(div, div.nextElementSibling, sel);
 	return div.nextElementSibling;
 }
-
-// Initialize
-document.addEventListener("selectionchange", (e) => {
-	let div = document.activeElement;
-	/* console.log(div); */
-	if (div.contentEditable == "true")
-		serialize_current(div);
-	log(`<b>${e.type}</b>`);
-});
-divs.forEach((div, idx) => {
-    // setup serialization
-    trim_whitespace(div);
-    div.after(document.createElement("pre"));
-    serialize_current(div);
-
-    // events
-    div.addEventListener("compositionstart", evt_msg);
-    div.addEventListener("compositionupdate", evt_msg);
-    div.addEventListener("compositionend", evt_msg);
-    div.addEventListener("beforeinput", e => {
-        if (cancel.checked)
-            e.preventDefault();
-        evt_msg(e);
-    });
-    div.addEventListener("input", evt_msg);
-});
