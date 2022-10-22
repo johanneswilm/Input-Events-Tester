@@ -13,13 +13,13 @@
  */
 export class HTMLSerialize {
 	// divisions in hue, when rotating colors for next element
-    static HUE_DIVS = 7;
+	static HUE_DIVS = 7;
 	// attributes to serialize; {js attribute -> html attribute}
-    static SHOW_ATTRS = {
-        className: "class"
-    };
+	static SHOW_ATTRS = {
+		className: "class"
+	};
 	// singelton tags/eleemnts
-    static SINGLETON = new Set(["br", "hr", "wbr", "col", "command", "img"]);
+	static SINGLETON = new Set(["br", "hr", "wbr", "col", "command", "img"]);
 	// counter for unique ids and colors; {container -> {id/hue: int}
 	static counter = new Map();
 
@@ -28,14 +28,14 @@ export class HTMLSerialize {
 	 * @param target where to render the serialization
 	 * @param {Selection | [Range] | [StaticRange]} ranges specifies anchors to be rendered
 	 */
-    constructor(src, target, ranges = null){
+	constructor(src, target, ranges = null){
 		this.src = src;
 		if (!HTMLSerialize.counter.has(src))
 			HTMLSerialize.counter.set(src, {id: 0, hue: 0});
-        this.frag = document.createDocumentFragment();
-        this.serialize_recursive(src, ranges ? HTMLSerialize.ranges2anchors(ranges) : null, true);
-        target.replaceChildren(this.frag);
-    }
+		this.frag = document.createDocumentFragment();
+		this.serialize_recursive(src, ranges ? HTMLSerialize.ranges2anchors(ranges) : null, true);
+		target.replaceChildren(this.frag);
+	}
 	
 	/** Give each node a unqiue id, and each element a hue. Can be used
 		to indicate whether a node was recreated/destroyed
@@ -55,8 +55,8 @@ export class HTMLSerialize {
 	 * @param anchors output of ranges2anchors
 	 * @param skip if true, only render children and any anchors
 	 */
-    serialize_recursive(el, anchors, skip = false) {
-        const istxt = el.nodeType == Node.TEXT_NODE;
+	serialize_recursive(el, anchors, skip = false) {
+		const istxt = el.nodeType == Node.TEXT_NODE;
 		let hsl_main, hsl_attr, tag; // for rendering matching open/close tag when !istxt
 		let a_locs = {};
 		if (anchors && anchors.has(el)){
@@ -67,10 +67,10 @@ export class HTMLSerialize {
 		// render
 		if ("before_open" in a_locs)
 			a_locs["before_open"].forEach(this.add_anchor.bind(this));
-        if (!skip) {
+		if (!skip) {
 			this.assign_id(el);
-            // text
-            if (istxt){
+			// text
+			if (istxt){
 				let txt = el.textContent;
 				let root = this.add_span({clazz:"text", sid:el.serialization.id});
 				if ("inside" in a_locs){
@@ -86,48 +86,48 @@ export class HTMLSerialize {
 				if (txt)
 					this.add_span({txt, root});
 			}
-            // start tag
-            else {
-                hsl_main = HTMLSerialize.hsl(el.serialization.hue);
-                hsl_attr = HTMLSerialize.hsl(el.serialization.hue, 75, 50);
-                tag = el.tagName.toLowerCase();
-                this.add_span({txt:`<${tag}`, clazz:"tag", style:hsl_main, sid:el.serialization.id});
-                // attributes whitelist
-                for (let attr in HTMLSerialize.SHOW_ATTRS) {
-                    if (el[attr])
-                        this.add_span({txt:` ${HTMLSerialize.SHOW_ATTRS[attr]}='${el[attr]}'`, clazz:"tag_attr", style:hsl_attr});
-                }
-                this.add_span({txt:`>`, clazz:"tag", style:hsl_main});
-            }
-        }
-        // children
-        if (el.firstChild)
-            this.serialize_recursive(el.firstChild, anchors);
+			// start tag
+			else {
+				hsl_main = HTMLSerialize.hsl(el.serialization.hue);
+				hsl_attr = HTMLSerialize.hsl(el.serialization.hue, 75, 50);
+				tag = el.tagName.toLowerCase();
+				this.add_span({txt:`<${tag}`, clazz:"tag", style:hsl_main, sid:el.serialization.id});
+				// attributes whitelist
+				for (let attr in HTMLSerialize.SHOW_ATTRS) {
+					if (el[attr])
+						this.add_span({txt:` ${HTMLSerialize.SHOW_ATTRS[attr]}='${el[attr]}'`, clazz:"tag_attr", style:hsl_attr});
+				}
+				this.add_span({txt:`>`, clazz:"tag", style:hsl_main});
+			}
+		}
+		// children
+		if (el.firstChild)
+			this.serialize_recursive(el.firstChild, anchors);
 		if ("before_close" in a_locs)
 			a_locs["before_close"].forEach(this.add_anchor.bind(this));
-        // end tag
-        if (!skip && !istxt && !HTMLSerialize.SINGLETON.has(tag)){
+		// end tag
+		if (!skip && !istxt && !HTMLSerialize.SINGLETON.has(tag)){
 			this.add_span({txt:`</${tag}`, clazz:"tag", style:hsl_main, sid:el.serialization.id});
 			this.add_span({txt:`>`, clazz:"tag", style:hsl_main});
 		}
-        // siblings
-        if (!skip && el.nextSibling)
-            this.serialize_recursive(el.nextSibling, anchors);
-    }
+		// siblings
+		if (!skip && el.nextSibling)
+			this.serialize_recursive(el.nextSibling, anchors);
+	}
 
-    add_span({txt=null, clazz=null, style=null, sid=null, root=null} = {}){
-        const s = document.createElement("span");
+	add_span({txt=null, clazz=null, style=null, sid=null, root=null} = {}){
+		const s = document.createElement("span");
 		if (txt)
-        	s.textContent = txt;
+			s.textContent = txt;
 		if (clazz)
-        	s.className = clazz;
+			s.className = clazz;
 		if (style)
-        	s.style = style;
+			s.style = style;
 		if (sid !== null)
 			s.dataset.sid = sid;
-        (root || this.frag).appendChild(s);
+		(root || this.frag).appendChild(s);
 		return s;
-    }
+	}
 	add_anchor(anchor, root=null){
 		const s = document.createElement("span");
 		s.dataset.range = anchor.type;
@@ -136,9 +136,9 @@ export class HTMLSerialize {
 	}
 
 	/** CSS color definition from HSL numbers */
-    static hsl(h, s = 100, l = 30) {
-        return `color: hsl(${h},${s}%,${l}%);`;
-    }
+	static hsl(h, s = 100, l = 30) {
+		return `color: hsl(${h},${s}%,${l}%);`;
+	}
 	/* Converts Selection, [StaticRange], or [Range] to Map in the form:
 		el (element we should render the cursor in reference to) => {
 			loc (before_open/before_close/inside) => [{

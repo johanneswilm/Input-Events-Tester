@@ -49,29 +49,29 @@ document.addEventListener("DOMContentLoaded", () => {
 
 // trim whitespace/textnodes from start/end of element
 function trim_whitespace(el) {
-    const f = el.firstChild,
-        l = el.lastChild;
-    if (f.nodeType == Node.TEXT_NODE) {
-        let d = f.data.trimStart();
+	const f = el.firstChild,
+		l = el.lastChild;
+	if (f.nodeType == Node.TEXT_NODE) {
+		let d = f.data.trimStart();
 		if (d) f.data = d;
 		else f.remove();
-    }
-    if (l.nodeType == Node.TEXT_NODE && l.parentNode) {
-        let d = l.data.trimEnd();
+	}
+	if (l.nodeType == Node.TEXT_NODE && l.parentNode) {
+		let d = l.data.trimEnd();
 		if (d) l.data = d;
 		else l.remove();
-    }
+	}
 }
 
 // Create a message for event and log it
 function evt_msg(e, cancel_attempted){
-    let etype = e.type;
-    if (e.inputType)
-        etype += "." + e.inputType;
+	let etype = e.type;
+	if (e.inputType)
+		etype += "." + e.inputType;
 	let root = document.createElement("div");
-    root.innerHTML = `<b>${etype}:</b><ul></ul>`;
+	root.innerHTML = `<b>${etype}:</b><ul></ul>`;
 	let list = root.lastElementChild;
-    const attr = (k, v) => {
+	const attr = (k, v) => {
 		let li = document.createElement("li");
 		li.textContent = `${k}: `;
 		if (v?.nodeType == Node.ELEMENT_NODE)
@@ -79,17 +79,17 @@ function evt_msg(e, cancel_attempted){
 		else li.textContent += JSON.stringify(v);
 		list.appendChild(li);
 	};
-    if (e.dataTransfer instanceof DataTransfer) {
-        attr('text/plain', e.dataTransfer.getData("text/plain"));
-        attr('text/html', e.dataTransfer.getData("text/html"));
-    }
-    if (typeof e.data !== "undefined")
-        attr('data', e.data);
-    if (typeof e.isComposing === "boolean")
-        attr('isComposing', e.isComposing);
-    attr('defaultPrevented', [e.defaultPrevented, cancel_attempted ? "attempted" : "not attempted"]);
-    attr('cancelable', e.cancelable);
-    attr('timeStamp', e.timeStamp);
+	if (e.dataTransfer instanceof DataTransfer) {
+		attr('text/plain', e.dataTransfer.getData("text/plain"));
+		attr('text/html', e.dataTransfer.getData("text/html"));
+	}
+	if (typeof e.data !== "undefined")
+		attr('data', e.data);
+	if (typeof e.isComposing === "boolean")
+		attr('isComposing', e.isComposing);
+	attr('defaultPrevented', [e.defaultPrevented, cancel_attempted ? "attempted" : "not attempted"]);
+	attr('cancelable', e.cancelable);
+	attr('timeStamp', e.timeStamp);
 	if (e.getTargetRanges){
 		let ranges = e.getTargetRanges();
 		if (ranges.length){
@@ -98,7 +98,7 @@ function evt_msg(e, cancel_attempted){
 			attr('ranges', pre);
 		}
 	}
-    attr('selection', serialize_current(e.target).cloneNode(true));
+	attr('selection', serialize_current(e.target).cloneNode(true));
 	log(root);
 }
 
@@ -120,5 +120,5 @@ function log(html) {
 	}
 	output.prepend(html);
 	while (output.children.length > limit.valueAsNumber)
-        output.lastElementChild.remove();
+		output.lastElementChild.remove();
 }
