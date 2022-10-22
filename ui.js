@@ -1,3 +1,4 @@
+"use strict";
 var output, divs, count, cancel;
 
 document.addEventListener("DOMContentLoaded", () => {
