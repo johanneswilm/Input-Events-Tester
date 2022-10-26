@@ -4,7 +4,7 @@ The following are several proposals to minimally modify the [Input Events specif
 
 *[High Priority]*
 
-Take the following examples:
+**Motivation:** Take the following examples:
 ```html
 Math:
 	x<sup>3</sup>(y<sub>i</sub>)
@@ -13,7 +13,7 @@ Programming:
 English:
 	the suffix -esque, as in pictur<u>esque</u>
 ```
-**Motivation:** There are two problems:
+There are two problems:
 
 1. When a single word is recomposed, as in Android IME, browsers may delete, add, or move elements and textnodes. If you try to edit a contiguous, styled string of text, the browser may absorb the styles into a single element unpredictably. Firefox always does this, while Chrome in some cases will be intelligent about which style to apply. For specific browser behavior, see the middle of [my comment here](https://github.com/w3c/input-events/issues/134#issuecomment-1289626740). Composition events cannot be controlled, so any styling will be ruined and we must wait for the composition to finish before repairing it; if the user is entering a long phrase, this will be a big jank in style and the user can get confused or assume the app is buggy.
 
