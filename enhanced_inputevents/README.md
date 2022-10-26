@@ -38,11 +38,11 @@ The idea here is not to cancel composition, or control the characters entered, b
 
 **Motivation:** During composition, we may detect characters that we know are stylistically or semantically disconnected. In English, a hyphen is common, such as "bluish-purple". As IME's are designed around human language, this would be interpreted as a single composition string. For a programming language, we have better knowledge than the IME that `-` is an operator and should be interpreted instead like a space or period.
 
-**Proposal:** Introduce a `requestCompositionEnd()` method to the `insertCompositionText` event of `beforeinput` and `input`. Calling the method will proceed with the `insertCompositionText` like normal, but then the browser will forcibly commit the composition, going through the traditional `deleteCompositionText`, `insertFromComposition`, and `compositionend` flow.
+**Proposal:** Introduce a `requestCompositionEnd()` method to the `insertCompositionText` event of `beforeinput` and `input`. Calling the method will proceed with the `insertCompositionText` like normal, but then the browser will forcibly commit the composition, going through the traditional `deleteCompositionText`, `insertFromComposition`, and `compositionend` flow. Modifying the DOM in the `compositionend` or canceled `insertFromComposition` event will be allowed.
 
 The idea is the developer can parse the replacement text (in `beforeinput`) or the current text (in `input`) and notify the browser when it knows the composition string should be finished. This allows an editor like CodeMirror to support mobile without a jank in style. If you try to enter `this-125` on CodeMirror's [homepage JavaScript demo](https://github.com/w3c/input-events/issues/codemirror.net) using Android, you'll notice a jank in style before syntax highlighting takes effect.
 
-**Emulating:** Requesting composition end can currently be emulated by blurring and then focusing the editor element. Since it can be emulated, it is less important, but introducing the API  would guarantee the behavior.
+**Emulating:** Requesting composition end can currently be emulated by blurring and then focusing the editor element. Since it can be emulated, it is less important, but introducing the API  would guarantee the behavior. The usefulness of ending composition manually is only fully realized with an accompanying `compositionborder` feature; otherwise, the browser will simply restart composition with the same text, possibly undoing any DOM modifications we made with the composition end request.
 
 ```javascript
 editor.blur();
