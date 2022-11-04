@@ -25,6 +25,8 @@ div[contenteditable]{
 	display:block;
 	margin:.3em;
 }
+div[contenteditable]>*{ display:inline-block; }
+/*.break::before{ content:"x"; }*/
 
 /* Event output log */
 output{

@@ -1,0 +1,18 @@
+#code_editor{
+	border:2px dotted black;
+	max-width:500px;
+	padding:6px;
+	font-family:monospace;
+	background-color: #303030;
+	caret-color: white !important;
+}
+#code_editor .integer{
+	color:#8edc71;
+}
+#code_editor .variable{
+	color:#ff5d69;
+}
+#code_editor .operator{
+	color: #1d9ff8;
+	font-weight:bold;
+}
