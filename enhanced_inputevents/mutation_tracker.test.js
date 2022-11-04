@@ -1,4 +1,5 @@
-import { MutationTracker, toggle_staticrange } from "./mutation_tracker.js";
+import { MutatedRange } from "./mutated_range.js";
+import { MutationTracker } from "./mutation_tracker.js";
 // Helpers for DOM creation
 let uid = 0;
 function node(){
@@ -26,18 +27,21 @@ class CachedDOM{
 		this.node = node;
 		this.children = [];
 		this.attrs = {};
-		if (node.nodeType instanceof CharacterData)
+		if (node.nodeType instanceof CharacterData){
 			this.attrs.data = node.data;
+			if (node.childNodes.length)
+				throw Error("assertion: CharacterData should not have children");
+		}
 		else{
 			if (node.getAttribute?.constructor === Function){
 				for (let k of allowed_attrs)
-					attrs[k] = node.getAttribute(k);
+					this.attrs[k] = node.getAttribute(k);
 			}
 			for (let c of node.childNodes)
-				children.push(new CachedDom(c));
+				this.children.push(new CachedDOM(c));
 		}
 	}
-	/** Check for differences with another CachedDom
+	/** Check for differences with another CachedDOM
 	 * @param {CachedDOM} other other DOM to compare against
 	 * @param {Boolean} forward whether to iterate childNodes forward or backward;
 	 * 	can be used to get left/right bounds of differences
@@ -58,7 +62,7 @@ class CachedDOM{
 		stack[stack.length-1].details = msg;
 		return stack;
 	}
-	_diff_rec(other, forward, stack){
+	#diff_rec(other, forward, stack){
 		if (this.node !== other.node)
 			return "nodes are different";
 		if (Object.keys(this.attrs).length != Object.keys(other.attrs).length)
@@ -80,7 +84,7 @@ class CachedDOM{
 				return "a is missing a child node";
 			if (!b)
 				return "b is missing a child node";
-			let msg = a._diff_rec(b, forward, stack);
+			let msg = a.#diff_rec(b, forward, stack);
 			if (msg)
 				return msg;
 			stack.pop();
@@ -126,19 +130,19 @@ class Tester{
 	/** Try reverting and see if it works */
 	check_revert(){
 		this.dom_mutated = new CachedDOM(this.root);
-		this.range = toggle_staticrange(this.tracker.range(this.root));
+		this.mutated = this.tracker.mutated(this.root);
+		this.range = this.tracker.range(this.root);
 		this.tracker.revert();
 		this.dom_reverted = new CachedDOM(this.root);
 		// check mutated
 		let fdiff = this.dom_original.diff(this.dom_mutated);
-		this.mutated = this.tracker.mutated(this.root);
-		if (mutated != !!fdiff){
+		if (this.mutated != !!fdiff){
 			console.error(fdiff);
 			throw Error("mutated incorrect");
 		}
-		if (mutated != !!this.range){
+		if (this.mutated != !!this.range){
 			console.error(this.range);
-			throw Error("range doesn't match mutated");
+			throw Error("range doesn't correspond with mutated");
 		}
 		// check range has correct bounds
 		if (this.range){
@@ -146,101 +150,34 @@ class Tester{
 			// convert diff to an equivalent range
 			if (fdiff.length <= 1 || bdiff.length <= 1)
 				throw Error("assertion: root has been modified");
-			let spec = {};
-			spec.startContainer = fdiff.get(-2).a;
-			spec.startOffset = fdiff.get(-1).index;
-			let end = spec.endContainer = bdiff.get(-2).a;
-			spec.endOffset = Math.min(bdiff.get(-1).index, end.children;
-
-
-
+			// build a range from the diff results
+			let mr = new MutatedRange();
+			let sel = fdiff.at(-2).a;
+			let sidx = fdiff.at(-1).index;
+			if (!sidx)
+				mr.setStart(sel.node, false);
+			else mr.setStart(sel.children[sidx-1].node, true);
+			let eel = bdiff.at(-2).a;
+			let eidx = bdiff.at(-1).index;
+			if (eidx >= eel.children.length-1)
+				mr.setEnd(eel.node, false);
+			else mr.setEnd(eel.children[eidx+1].node, true);
+			// compare range
+			if (!mr.isEqual(this.range)){
+				console.error("reported:", this.range);
+				console.error("actual:", mr);
+				console.error("fdiff:", fdiff);
+				console.error("fbiff:", bdiff);
+				console.error("range is not correct");
+			}
 		}
-		
 		// check revert
-		let diff = Tester.deep_diff(this.dom_original, this.dom_reverted);
-		if (diff){
-			console.error(diff);
+		let rdiff = this.dom_original.diff(this.dom_reverted);
+		if (rdiff){
+			console.error(rdiff);
 			throw Error("revert failed");
 		}
-	}
-
-	/** Cache DOM to check for equality later */
-	static cache(dom){
-		
-	}
-	
-	/** Check for equality, recursing on literal arrays and objects
-	 * @param a first value to compare
-	 * @param b second value to compare
-	 * @param {Boolean} forward whether to traverse arrays forward, or false for backward;
-	 * 	finding the diff forward and backward can give you bounds for the difference
-	 * @returns false if equal, otherwise object {
-	 * 	path: nested path to different objects,
-	 * 	stack: a list of pairs [a,b], indicating the object comparison stack; each pair corresponds
-	 * 		to the slice in `path`; the last pair is the values that were different
-	 * 	msg: more descriptive message of the difference
-	 * }
-	 */
-	static deep_diff(a, b, forward=true, log=null){
-		// Note: disabling the shortcut length checks, so we can get an
-		// 	exact index of where difference is
-		function type(v){
-			if (Array.isArray(v))
-				return 0;
-			if (!!v && v.constructor === Object)
-				return 1;
-			return 2;
-		}
-		if (log === null)
-			log = {path: [], stack: []};
-		log.diff = [a,b];
-		const at = type(a), bt = type(b);
-		if (at !== bt){
-			log.msg = "types differ";
-			return log;
-		}
-		switch (at){
-			// array recursion
-			case 0:
-				/*if (a.length !== b.length){
-					log.msg = "array lengths differ";
-					return log;
-				}*/
-				log.stack.push(0);
-				for (let i=(forward ? 0 : a.length-1); forward ? i<a.length : i>=0; forward ? i++ : i--){
-					log.stack[log.stack.length-1] = i;
-					if (Tester.deep_diff(a[i],b[i]))
-						return log;
-				}
-				log.stack.pop();
-				break;
-			// object recursion
-			case 1:
-				/*if (Object.keys(a).length != Object.keys(b).length){
-					log.msg = "object size differs";
-					return log;
-				}*/
-				log.stack.push(null);
-				for (let k in a){
-					log.stack[log.stack.length-1] = k;
-					if (!(k in b)){
-						log.msg = "b missing a key";
-						return log;
-					}
-					if (Tester.deep_diff(a[k], b[k]))
-						return log;
-				}
-				log.stack.pop();
-				break;
-			// other
-			case 2:
-				if (a !== b){
-					log.msg = "values differ";
-					return log;
-				}
-				break;
-		}
-		return false;
+		console.log("tests passed")
 	}
 }
 
@@ -257,22 +194,4 @@ document.addEventListener("DOMContentLoaded", e => {
 	root.prepend(B);
 	t.stop();
 	t.check_revert();
-
-
-	const i = document.querySelector("body");
-	let o = new MutationObserver((records) => {
-		for (let r of records)
-			console.log(r);
-	});
-	o.observe(i, {
-		subtree: true,
-		childList: true,
-		attributes: true,
-		// attributeFilter: allowed_attrs,
-		attributeOldValue: true,
-		characterData: true, 
-		characterDataOldValue: true,
-	});
-	i.children[1].after(C);
-	i.children[1].replaceWith(A,B,C);
 });

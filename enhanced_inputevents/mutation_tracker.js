@@ -1,4 +1,4 @@
-import { MutatedRange } from "./mutated_range";
+import { MutatedRange } from "./mutated_range.js";
 
 /** Tracks mutations performed on the DOM, allowing DOM to be reverted to its
  * 	initial state, or a Range to be queried with the extent of DOM mutations.
@@ -320,13 +320,7 @@ export class MutationTracker{
 		const union = () => {
 			if (fr === null)
 				fr = sr.cloneRange();
-			else{
-				// this naturally throws an error if nodes are disconnected, which is what we want
-				if (fr.compareBoundaryPoints(Range.START_TO_START, sr) == 1)
-					fr.setStart(sr.startContainer, sr.startOffset);
-				if (fr.compareBoundaryPoints(Range.END_TO_END, sr) == -1)
-					fr.setEnd(sr.endContainer, sr.endOffset);
-			}
+			else fr.extend(sr);
 		};
 		/** Include node that is inside root */
 		const include = (node) => {
@@ -348,7 +342,7 @@ export class MutationTracker{
 				in which case the range will extend to *their* siblings. Since they may have
 				moved, we can't just define a range from prev to next, as that range may not
 				be valid. Better to just treat the prev/next endpoints by themselves (as a
-				collapsed Range)
+				collapsed range)
 			*/
 			const p = op.parent;
 			if (p){
@@ -357,38 +351,33 @@ export class MutationTracker{
 				// after prev
 				if (prev){
 					if (prev.parentNode && include(prev)){
-						sr.setEndAfter(prev);
-						sr.collapse();
+						sr.setStartCollapsed(prev, true);
 						union();
 					}
 				}
 				// start of parent
 				else if (include_parent){
-					sr.setEnd(p, 0);
-					sr.collapse();
+					sr.setStartCollapsed(p, false);
 					union();
 				}
 				// before next
 				if (next){
 					if (next.parentNode && include(next)){
-						sr.setEndBefore(next);
-						sr.collapse();
+						sr.setEndCollapsed(next, true);
 						union();
 					}
 				}
 				// end of parent
 				else if (include_parent){
-					const offset = p.childNodes.length;
-					// if zero, may have already done this anchor in prev branch
-					if (offset || prev){
-						sr.setEnd(p, offset);
-						sr.collapse();
+					// if no children, may have already done this anchor in !prev branch
+					if (p.firstChild || prev){
+						sr.setEndCollapsed(p, false);
 						union();
 					}
 				}
 			}
 		}
-		return MutatedRange.fromRange(fr);
+		return fr;
 	}
 
 	/** Revert the DOM to its original state. This also has yields the effects of `clear()`
