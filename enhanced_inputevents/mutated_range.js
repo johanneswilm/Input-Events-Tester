@@ -1,17 +1,28 @@
 /** Represents a range bounding mutations. Performing mutations within the bounds will not
  * 	invalidate this range. You can convert this to DOM Range or StaticRange objects, however
  * 	these both could be invalidated by a mutation inside the range. This does not support
- * 	ranges within CharacterData nodes, as the MutatedRange is tracking the *nodes* that change,
- * 	not the *properties or data* of those nodes. You can specify a false `after_close` or
- * 	`before_open` for a CharacterData node, but when converted to/from a Range/StaticRange it will
- * 	be extended to include the full node as mutated; this is because while CharacterData are Node's,
- * 	and have a childNodes property, they don't actually let you add children; so in this case, the
- * 	opening/closing bounds aren't relevant.
+ * 	text offsets within CharacterData nodes, as the MutatedRange is tracking the *nodes* that change,
+ * 	not the *properties or data* of those nodes.
  * 
  * 	MutatedRange behaves like StaticRange, in that it does not validate the starting anchor is
- * 	before the ending anchor; the range will not move or collapse as the DOM is mutated.
+ * 	before the ending anchor; the range will not move or collapse as the DOM is mutated. However,
+ * 	when altering the range, it will usually need to traverse the DOM so the DOM must accurate.
+ * 	You can use `setStart()` or `setEnd()` with `collapse=false` to set the anchors directly
+ * 	and avoid DOM traversal.
  * 
- * 	The range is defined by four properties:
+ * 	The range is defined by a fixed starting and ending anchor node. Mutations come after the
+ * 	starting anchor, and before the ending anchor. A node itself bounds nested child nodes, and so
+ * 	has an opening and closing boundary; you can specify whether the anchor is in reference
+ * 	to this open or closing boundary. Note that you *can* specify the opening/closing boundary
+ * 	for CharacterData nodes, even though they cannot have children; since CharacterData is a
+ * 	Node, and so has childNodes and related interfaces, it seems better to keep consistent
+ * 	Node handling throughout even if some nodes like CharacterData or certain HTMLElements
+ * 	happen to disallow children. For these nodes, its recommended to expand the range to include
+ * 	that element. The `normalize()` method will perform this expansion for CharacterData nodes,
+ * 	but others like certain HTMLElements, you will need to do the expansion yourself. Note
+ * 	that when converting to/from a Range/StaticRange object, the range is expanded automatically
+ * 	to include CharacterData nodes; this is because Range/StaticRange use a text
+ * 	offset for these nodes, which MutatedRange does not support.
  * 
  * 	@member {Node} after Mutations follow this node's opening or closing bounds
  *  @member {Boolean} after_close Whether mutations follow the closing bounds (true, children are not mutated)
@@ -21,17 +32,36 @@
  *		or the closing bounds (false, children are mutated) of `before`
  */
 export class MutatedRange{
+	////// Trying to adhere to Range interface where applicable ///////
+
 	/** Create a new MutatedRange
-	 * @param spec an object containing the properties: after, after_close, before, before_open;
-	 * 	if ommitted, an uninitialized MutatedRange is created, and you should set the properties
-	 * 	manually before using
+	 * @param {Range | StaticRange | MutatedRange | Object | null} spec
+	 * Defines the starting/ending anchor for the new range. A number of spec formats are allowed:
+	 * - `Range`: Converts from a Range. If the start/end anchor are inside a CharacterData node, these
+	 * 	are automatically extended to include the node in the mutated range
+	 * - `StaticRange`: Converts from a StaticRange. If the start/end anchor are inside a CharacterData
+	 * 	node, these are automatically extended to include the node in the mutated range. The StaticRange
+	 * 	interface uses different DOM nodes as reference, so the current DOM may be traversed to build the
+	 * 	StaticRange. Keep this in mind, as even though it is a "static" range, it is not static for the
+	 * 	purposes of encoding a mutated range.
+	 * - `MutatedRange`: Equivalent to `spec.cloneRange()`
+	 * - `Object`: An object with the properties: `after`, `after_close`, `before`, and `before_open`;
+	 * 	these are passed to `setStart()` and `setEnd()`
+	 * - `null`: Creates an empty Range
 	 */
-	constructor(spec){
-		if (spec){
-			this.after = spec.after;
-			this.after_close = spec.after_close;
-			this.before = spec.before;
-			this.before_open = spec.before_open;
+	constructor(spec=null){
+		if (!spec){
+			this.setStart(null, true);
+			this.setEnd(null, true);
+		}
+		else if (spec instanceof Range || spec instanceof StaticRange){
+			this.setStartOffset(spec.startContainer, spec.startOffset);
+			this.setEndOffset(spec.endContainer, spec.endOffset);
+		}
+		// MutatedRange and plain object
+		else{
+			this.setStart(spec.after, spec.after_close);
+			this.setEnd(spec.before, spec.before_open);
 		}
 	}
 
@@ -49,56 +79,13 @@ export class MutatedRange{
 		return i;
 	}
 
-	/** Convert a Range to MutatedRange
-	 * 
-	 * Note: If the range start/end anchor is inside a CharacterData node,
-	 * 	these are extended to include the node in the mutated range
-	 */
-	static fromRange(r){
-		const mr = new MutatedRange();
-		// start anchor
-		const s = r.startContainer;
-		if (s instanceof CharacterData){
-			mr.after_close = Boolean(s.previousSibling);
-			mr.after = mr.after_close ? s.previousSibling : MutatedRange.#safe_parent(s);
-		}
-		else{
-			mr.after_close = Boolean(r.startOffset);
-			mr.after = mr.after_close ? s.childNodes[r.startOffset-1] : s;
-		}
-		// end anchor
-		const e = r.endContainer;
-		if (e instanceof CharacterData){
-			mr.before_open = Boolean(s.nextSibling);
-			mr.before = mr.before_open ? s.nextSibling : MutatedRange.#safe_parent(s);
-		}
-		else{
-			mr.before_open = r.endOffset != e.childNodes.length;
-			mr.before = mr.before_open ? s.childNodes[r.endOffset] : e;
-		}
-	}
-	/** Convert a StaticRange to MutatedRange
-	 * 
-	 * Note: In order to make the MutatedRange impervious to mutations, it needs
-	 * 	to fetch extra context about the surrounding DOM which is not provided by
-	 * 	the StaticRange interface. If the StaticRange is not reflective of the current
-	 * 	DOM, then this could lead to an unexpected MutatedRange result. If the DOM
-	 * 	is not accurate, and you cannot create a MutatedRange at the time the DOM is
-	 * 	an accurate representation of StaticRange, you should manually construct the
-	 * 	MutatedRange yourself (`new MutatedRange(spec)`)
-	 * 
-	 * Note: If the range start/end anchor is inside a CharacterData node,
-	 * 	these are extended to include the node in the mutated range
-	 */
-	static fromStaticRange(r){
-		return MutatedRange.fromRange(r);
-	}
-
 	/** Convert to Range interface. Range's end is set last, so if the resulting range's
-	 * 	anchors would be out of order, it would get collapsed to the end anchor.
+	 * 	anchors would be out of order, it would get collapsed to the end anchor. The
+	 * 	Range interface requires different DOM nodes as reference, so the current DOM
+	 * 	may be traversed to build the Range.
 	 * 
-	 * Note: if `after_close` or `before_open` are false for a CharacterData node,
-	 * 	the range is extended to include the node in the mutated range
+	 * Note: If the range start/end anchor is inside a CharacterData node,
+	 * 	these are extended to include the node in the output range
 	 */
 	toRange(){
 		const r = new Range();
@@ -116,14 +103,12 @@ export class MutatedRange{
 		else r.setEnd(this.before, this.before.childNodes.length);
 		return r;
 	}
-	/** Convert to StaticRange interface
+	/** Convert to StaticRange interface. The StaticRange interface uses
+	 * 	different DOM nodes as reference, so the current DOM may be traversed to
+	 * 	build the StaticRange.
 	 * 
-	 * Note: The StaticRange interface doesn't encode the necessary information to
-	 * 	be immutable with mutations within its range. The StaticRange this method
-	 * 	generates is based on the current view of the DOM.
-	 * 
-	 * Note: if `after_close` or `before_open` are false for a CharacterData node,
-	 * 	the range is extended to include the node in the mutated range
+	 * Note: If the range start/end anchor is inside a CharacterData node,
+	 * 	these are extended to include the node in the output range
 	 */
 	toStaticRange(){
 		// Range may have side effects from being unordered, so can't reuse toRange for this
@@ -149,8 +134,6 @@ export class MutatedRange{
 		return new StaticRange(spec);
 	}
 
-	////// Trying to adhere to Range interface for methods below where applicable ///////
-
 	/** Expand anchors inside CharacterData nodes to contain the node */
 	normalize(){
 		if (!this.after_close && this.after instanceof CharacterData)
@@ -163,124 +146,127 @@ export class MutatedRange{
 	 * 	The start/end anchors may be in the same position, but they have an implicit
 	 * 	"side", so to speak. Collapsed in this context means that there are no DOM nodes
 	 * 	in between the start/end.
-	 * @returns {Boolean} true if collapsed; if the start/end anchors are disconnected
-	 * 	or out-of-order, it returns false
+	 * @returns {Boolean} true if collapsed, otherwise false; if the start/end anchors
+	 * 	are disconnected or out-of-order, it returns false
 	 */
 	get collapsed(){
 		if (this.after_close == this.before_open){
 			// must be adjacent
 			if (this.after_close)
 				return this.after.nextSibling === this.before;
-			// must be inside the same empty node, except CharacterData
-			return this.after === this.before && !(this.after instanceof CharacterData) && !this.after.firstChild;
+			// must be inside the same empty node
+			return this.after === this.before && !this.after.firstChild;
 		}
-		if (this.after_close){
-			// expanding before would result in collapse
-			if (this.before instanceof CharacterData)
-				return this.before === this.after;
-			// end of node
+		// end of node
+		if (this.after_close)
 			return !this.after.nextSibling && this.after.parentNode === this.before;
-		}
-		// expanding after would result in collapse
-		if (this.after instanceof CharacterData)
-			return this.before === this.after;
 		// start of node
 		return !this.before.previousSibling && this.before.parentNode === this.after;
 	}
-	/** Collapse the range to one of the boundary points in the current DOM
+	/** Collapse the range to one of the boundary points
 	 * @param {Boolean} toStart if true collapses to the start anchor (after/after_close);
 	 * 	if false (the default), collapses to the end anchor (before/before_open)
 	 */
 	collapse(toStart=false){
 		if (toStart){
-			if (this.after_close){
-				const next = this.after.nextSibling;
-				this.before = next || MutatedRange.#safe_parent(this.after);
-				this.before_open = Boolean(next);
-			}
-			else if (this.after instanceof CharacterData){
-				this.before = this.after;
-				this.before_open = true;
-				const prev = this.after.previousSibling;
-				this.after = prev || MutatedRange.#safe_parent(this.after);
-				this.after_close = Boolean(prev);
-			}
+			if (this.after_close)
+				this.setEndAfter(this.after);
 			else{
 				const child = this.after.firstChild;
-				this.before = child || this.after;
-				this.before_open = Boolean(child);
+				this.setEnd(child || this.after, Boolean(child));
 			}
 		}
 		else{
-			if (this.before_open){
-				const prev = this.before.previousSibling;
-				this.after = prev || MutatedRange.#safe_parent(this.before);
-				this.after_close = Boolean(prev);
-			}
-			else if (this.before instanceof CharacterData){
-				this.after = this.before;
-				this.after_close = true;
-				const next = this.before.nextSibling;
-				this.before = next || MutatedRange.#safe_parent(this.before);
-				this.before_open = Boolean(next);
-			}
+			if (this.before_open)
+				this.setStartBefore(this.before);
 			else{
 				const child = this.before.lastChild;
-				this.after = child || this.before;
-				this.after_close = Boolean(child);
+				this.setStart(child || this.before, Boolean(child));
 			}
 		}
 	}
-	/** Equivalent `setStart(...)` then `collapse(true)` */
-	setStartCollapsed(after, after_close){
-		this.setStart(after, after_close);
-		this.collapse(true);
-	}
-	/** Equivalent `setEnd(...)` then `collapse(true)` */
-	setEndCollapsed(before, before_open){
-		this.setEnd(before, before_open);
-		this.collapse(false);
-	}
-	/** Set starting anchor (after/after_close) */
-	setStart(after, after_close){
+	/** Set starting anchor (after/after_close)
+	 * @param {Node} after
+	 * @param {Boolean} after_close
+	 * @param {Boolean} collapse if true, calls `collapse(true)` after setting the anchor
+	 */
+	setStart(after, after_close, collapse=false){
 		this.after = after;
 		this.after_close = after_close;
+		if (collapse)
+			this.collapse(true);
 	}
-	/** Set ending anchor (before/before_open) */
-	setEnd(before, before_open){
+	/** Set ending anchor (before/before_open)
+	 * @param {Boolean} collapse if true, calls `collapse(false)` after setting the anchor
+	 */
+	setEnd(before, before_open, collapse=false){
 		this.before = before;
 		this.before_open = before_open;
+		if (collapse)
+			this.collapse(false);
 	}
-	/** Set starting anchor (after/after_close) to be before a node */
-	setStartBefore(node){
+	/** Set starting anchor (after/after_close) to be before a node
+	 * @param {Node} node
+	 * @param {Boolean} collapse if true, calls `collapse(true)` after setting the anchor
+	 */
+	setStartBefore(node, collapse=false){
 		const prev = node.previousSibling;
-		this.after = prev || MutatedRange.#safe_parent(node);
-		this.after_close = Boolean(prev);
+		this.setStart(prev || MutatedRange.#safe_parent(node), Boolean(prev), collapse);
 	}
-	/** Set ending anchor (before/before_open) to be after a node */
-	setEndAfter(node){
+	/** Set ending anchor (before/before_open) to be after a node
+	 * @param {Boolean} collapse if true, calls `collapse(false)` after setting the anchor
+	 */
+	setEndAfter(node, collapse=false){
 		const next = node.nextSibling;
-		this.before = next || MutatedRange.#safe_parent(node);
-		this.before_open = Boolean(next);
+		this.setEnd(next || MutatedRange.#safe_parent(node), Boolean(next), collapse);
+	}
+	/** Set starting anchor using an offset inside a node, in the manner of Range/StaticRange
+	 * @param node node where the range should start
+	 * @param offset integer giving the offset into node.childNodes, or for CharacterData nodes,
+	 * 	the text content; an offset within a CharacterData node will be automatically expanded
+	 * 	to include the whole node in the range
+	 * @param {Boolean} collapse if true, calls `collapse(true)` after setting the anchor
+	 */
+	setStartOffset(node, offset, collapse=false){
+		if (node instanceof CharacterData)
+			this.setStartBefore(node, collapse);
+		else{
+			const close = Boolean(offset);
+			this.setStart(close ? node.childNodes[offset-1] : node, close, collapse);
+		}
+	}
+	/** Set ending anchor using an offset inside a node, in the manner of Range/StaticRange
+	 * @param node node where the range should start
+	 * @param offset integer giving the offset into node.childNodes, or for CharacterData nodes,
+	 * 	the text content; an offset within a CharacterData node will be automatically expanded
+	 * 	to include the whole node in the range
+	 * @param {Boolean} collapse if true, calls `collapse(false)` after setting the anchor
+	 */
+	setEndOffset(node, offset, collapse=false){
+		if (node instanceof CharacterData)
+			this.setEndAfter(node, collapse);
+		else{
+			const open = offset != node.childNodes.length;
+			this.setEnd(open ? node.childNodes[offset] : node, open, collapse);
+		}
 	}
 	/** Make a copy of this range */
 	cloneRange(){
-		return new MutatedRange({
-			after: this.after,
-			after_close: this.after_close,
-			before: this.before,
-			before_open: this.before_open
-		});
+		return new MutatedRange(this);
 	}
-	/** Set range to surround a single node in the current DOM */
+	/** Set range to surround a single node
+	 * @param {Node} node the node to surround
+	 */
 	selectNode(node){
 		this.setStartBefore(node);
 		this.setEndAfter(node);
 	}
-	/** Set range to surround the contents of a node in the current DOM */
+	/** Set range to surround the contents of a node;
+	 * 	Warning, for CharacterData nodes, you probably want to use selectNode instead,
+	 * 	since these nodes cannot have children
+	 * @param {Node} node node whose contents to enclose
+	 */
 	selectNodeContents(node){
-		if (node instanceof CharacterData)
-			return this.selectNode(node);
 		this.after = this.before = node;
 		this.before_open = this.after_close = false;
 	}
@@ -323,15 +309,10 @@ export class MutatedRange{
 			this.before_open = other.before_open;
 		}
 	}
-	/** Check if range matches another
-	 * @param {Boolean} normalize if false, it will check for strict equality;
-	 * 	if true it calls normalize to expand CharacterData nodes
+	/** Check if range matches another;
+	 * 	You may wish to call `normalize()` on the ranges prior to comparison
 	 */
-	isEqual(other, normalize=true){
-		if (normalize){
-			this.normalize();
-			other.normalize();
-		}
+	isEqual(other){
 		return (
 			this.after === other.after &&
 			this.after_close == other.after_close &&

@@ -1,5 +1,22 @@
 import { MutatedRange } from "./mutated_range.js";
 
+/** Cleaner interface, in my opinion, for iterating in a resumable manner.
+ * @param it an iterator
+ * @returns a resumable iterator object; use like so:
+ * ```
+ *		while(it.next()){ it.value };
+ * ```
+ */
+function resumable(it){
+	let out = {};
+	out.next = () => {
+		const n = it.next();
+		out.value = n.value;
+		return !out.done;
+	};
+	return out;
+}
+
 /** Tracks mutations performed on the DOM, allowing DOM to be reverted to its
  * 	initial state, or a Range to be queried with the extent of DOM mutations.
  * 
@@ -115,68 +132,40 @@ export class MutationTracker{
 		else{
 			// detect if node position has been reverted
 			if (parent === op.parent){
-				/* Look for a fixed reference among siblings. A "fixed" reference is one that
-					is in its original position (e.g. not in this.floating). If we find an adjacent fixed
-					reference and that reference matches the original sibilng, we can propagate the "fixedness" 
-					to node, and then on to any other siblings in the other direction. A sibling may match the
-					original sibling, indicating the correct relative position, but that sibling must itself
-					be fixed to indicate the correct absolute position.
-				*/
 				// whether we know node's position has been reverted
 				let fixed = false;
 				// if node becomes fixed, we may be able to propagate fixedness to siblings;
-				// {sibling: sibling that can become fixed, it: sibling iterator, dir: direction next/prev}
+				// {node: sibling that can become fixed, it: sibling iterator, dir: direction next/prev}
 				let fixed_candidate = null;
 				/** Searches for a fixed sibling */
-				const find_fixed = (start, dir, set_candidate) => {
-					const it = this.mutated_graph.traverse(start, dir);
-					for (const sibling of it){
-						if (sibling){
-							const sop = this.floating.get(sibling);
-							if (sop){
-								// ignore nodes that would get moved to a different parent
-								if (sop.parent !== parent)
-									continue;
-								// correct relative position, but sibling is not fixed
-								if (set_candidate && n === op[dir])
-									fixed_candidate = {sibling, it, dir};
-								break;
-							}
+				const find_fixed = (start, dir) => {
+					const it = resumable(this.#traverse_proper_children(parent, start, dir, true));
+					// iterator will always yield *some* fixed reference before ending, due
+					// to the way we are building mutated_graph
+					while (it.next()){
+						const {node, floating} = it.value;
+						if (floating){
+							// correct relative position, but sibling is not fixed
+							if (dir == "prev" && node === op[dir])
+								fixed_candidate = {node, it, dir: "next"};
+							break;
 						}
 						// found fixed reference, which may or not be the correct node
-						if (sibling === op[dir])
+						else if (node === op[dir])
 							fixed = true;
 						break;
 					}
 				}
 				// look for fixed reference in either direction
-				find_fixed(prev, "prev", true);
+				find_fixed(prev, "prev");
 				if (!fixed)
-					find_fixed(next, "next", false);
+					find_fixed(next, "next");
 				// we haven't traversed in the other direction for a possible propogation candidate
-				else fixed_candidate = {sibling: node, it: this.mutated_graph.traverse(next, "next"), dir: "next"};
+				else fixed_candidate = {node, it: resumable(this.#traverse_proper_children(parent, next, "next", true)), dir: "prev"};
 				if (fixed){
 					this.floating.delete(node);
-					// Propagate the fixedness to any siblings
-					if (fixed_candidate){
-						let ref = fixed_candidate.sibling;
-						if (ref !== node)
-							this.floating.delete(ref);
-						for (const sibling of fixed_candidate.it){
-							// null, we've reached start/end of container; nothing more to become fixed
-							if (!sibling) break;
-							const sop = this.floating.get(sibling);
-							// already fixed; no need to traverse further
-							if (!sop) break;
-							// ignore nodes that would get moved to a different parent
-							if (sop.parent !== parent) continue;
-							// sibling is incorrect
-							if (sop[fixed_candidate.dir] !== ref) break;
-							// sibling is now fixed
-							ref = sibling;
-							this.floating.delete(ref);
-						}
-					}
+					if (fixed_candidate)
+						this.#mark_fixed(fixed_candidate.node, fixed_candidate.it, fixed_candidate.dir, fixed_candidate.sibling !== node);
 				}
 			}	
 			// (optional) prev<->node and node<->next relationship may be restored
@@ -196,23 +185,96 @@ export class MutationTracker{
 		const op = this.floating.get(node);
 		// removing node for the first time
 		if (!op){
-			const gprev = this.original_graph.prev(node);
-			const gnext = this.original_graph.next(node);
+			let gprev = this.original_graph.prev(node);
+			let gnext = this.original_graph.next(node);
 			// record broken siblings, if not broken already
-			if (gprev === undefined)
+			if (gprev === undefined){
 				this.original_graph.add(prev, node);
-			else prev = gprev;
-			if (gnext === undefined)
+				gprev = prev;
+			}
+			if (gnext === undefined){
 				this.original_graph.add(node, next);
-			else next = gnext;
-			this.floating.set(node, {parent, prev, next});
+				gnext = next;
+			}
+			this.floating.set(node, {parent, prev: gprev, next: gnext});
 		}
 		// add + remove cancel out
 		else if (!op.parent)
 			this.floating.delete(node);
-		// otherwise, original position was recorded earlier		
+		// otherwise, original position was recorded earlier;
+		// removing this node may cause a sibling to be in its reverted position
+		if (!op || op.parent === parent){
+			const pit = resumable(this.#traverse_proper_children(parent, prev, "prev", true));
+			const nit = resumable(this.#traverse_proper_children(parent, next, "next", true));
+			pit.next();
+			nit.next();
+			const prev_fixed = !pit.value.floating;
+			const next_fixed = !nit.value.floating;
+			if (prev_fixed != next_fixed){
+				let it, dir;
+				if (prev_fixed){
+					it = nit;
+					dir = "prev";
+				}
+				else{
+					it = pit;
+					dir = "next";
+				}
+				this.#mark_fixed(it.value.node, it, dir, true);
+			}
+		}
 		// (optional) prev<->next relationship may be restored
 		this.original_graph.maybe_remove(prev, next);
+	}
+
+	/** Traverse proper/original children of a parent. The child may be either fixed
+	 * 	or floating. A "fixed" child is one that is in its original position (e.g. not in
+	 * 	this.floating). A child may have the correct original siblings, indicating the correct
+	 * 	relative position, but a sibling must itself must be fixed to indicate the correct
+	 * 	absolute position.
+	 * 
+	 * `node`, `dir`, and `inclusive` params are forwarded to SiblingGraph.traverse
+	 * 
+	 * @param {Node} parent the current parent we are traversing, used to check "proper" children
+	 * @yields an object {node, floating}, where node is the child and floating is either null
+	 * 	(child is fixed) or an object with the original position (child is floating)
+	 */
+	*#traverse_proper_children(parent, node, dir, inclusive){
+		const it = this.mutated_graph.traverse(node, dir, inclusive);
+		for (const node of it){
+			if (node){
+				const op = this.floating.get(node);
+				if (op){
+					// wrong parent
+					if (op.parent !== parent)
+						continue;
+					yield {node, floating: op};
+					continue;
+				}
+			}
+			// null or fixed node
+			yield {node, floating: null};
+		}
+	}
+
+	/** Mark a node as being fixed, and then propagate fixedness to any siblings if possible
+	 * @param {Node} node the node that has become fixed
+	 * @param it an iterator given by resumable(traverse_proper_children)
+	 * @param {String} dir "next" or "prev" indicating the *opposite* direction the iterator is traversing
+	 * @param {Boolean} inclusive whether `node` should be marked
+	 */
+	#mark_fixed(node, it, dir, inclusive){
+		if (inclusive)
+			this.floating.delete(node);
+		while (it.next()){
+			const v = it.value;
+			// end of container, fixed node, or incorrect sibling
+			// (Note, sibling check is opposite of direction)
+			if (!v.floating || v.floating[dir] !== node)
+				break;
+			node = v.node;
+			this.floating.delete(node);
+		}
 	}
 
 	/** Shared method for tracking attribute and data changes */
@@ -351,19 +413,19 @@ export class MutationTracker{
 				// after prev
 				if (prev){
 					if (prev.parentNode && include(prev)){
-						sr.setStartCollapsed(prev, true);
+						sr.setStart(prev, true, true);
 						union();
 					}
 				}
 				// start of parent
 				else if (include_parent){
-					sr.setStartCollapsed(p, false);
+					sr.setStart(p, false, true);
 					union();
 				}
 				// before next
 				if (next){
 					if (next.parentNode && include(next)){
-						sr.setEndCollapsed(next, true);
+						sr.setEnd(next, true, true);
 						union();
 					}
 				}
@@ -371,7 +433,7 @@ export class MutationTracker{
 				else if (include_parent){
 					// if no children, may have already done this anchor in !prev branch
 					if (p.firstChild || prev){
-						sr.setEndCollapsed(p, false);
+						sr.setEnd(p, false, true);
 						union();
 					}
 				}
@@ -589,19 +651,16 @@ class SiblingGraph{
 			this._prev.set(c,a);
 	}
 	/** Traverse the sibling graph
-	 * @param node node to start with
-	 * @param dir direction, either "next" or "prev"
-	 * @param fltr fn(node) -> bool; callback to filter which nodes to yield
+	 * @param {Node} node node to start with
+	 * @param {String} dir direction, either "next" or "prev"
+	 * @param {Boolean} inclusive whether to include `node` in traversal
 	 * @yields `node` and then any siblings (including a possible "null" sibling)
 	 */
-	*traverse(node, dir){
-		dir = this[dir];
-		while (true){
-			// if (fltr(node))
+	*traverse(node, dir, inclusive=false){
+		const advance = this[dir].bind(this);
+		if (inclusive)
 			yield node;
-			node = dir.get(node);
-			if (node === undefined)
-				return;
-		}
+		while ((node = advance(node)) !== undefined)
+			yield node;
 	}
 }

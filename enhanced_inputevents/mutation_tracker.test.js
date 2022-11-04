@@ -128,7 +128,7 @@ class Tester{
 		this.observer.disconnect();
 	}
 	/** Try reverting and see if it works */
-	check_revert(){
+	check_revert(name){
 		this.dom_mutated = new CachedDOM(this.root);
 		this.mutated = this.tracker.mutated(this.root);
 		this.range = this.tracker.range(this.root);
@@ -168,7 +168,7 @@ class Tester{
 				console.error("actual:", mr);
 				console.error("fdiff:", fdiff);
 				console.error("fbiff:", bdiff);
-				console.error("range is not correct");
+				throw Error("range is incorrect");
 			}
 		}
 		// check revert
@@ -177,21 +177,40 @@ class Tester{
 			console.error(rdiff);
 			throw Error("revert failed");
 		}
-		console.log("tests passed")
+		console.log(`test ${name} passed`)
 	}
 }
 
 document.addEventListener("DOMContentLoaded", e => {
 	const t = new Tester();
 	let root = node();
-
-	// test 1
 	let [A,B,C] = nodes(3);
 	root.append(A,B,C);
+
+	//*/ test 1
 	t.start(root);
 	root.append(A);
 	root.prepend(C);
 	root.prepend(B);
 	t.stop();
-	t.check_revert();
+	t.check_revert(1);
+	//*/
+
+	//*/ test 2
+	t.start(root);
+	root.append(A);
+	root.append(B);
+	root.append(C);
+	t.stop();
+	t.check_revert(2);
+	//*/
+
+	//*/ test 3
+	t.start(root);
+	root.append(A);
+	root.append(B);
+	C.remove();
+	t.stop();
+	t.check_revert(3);
+	//*/
 });
