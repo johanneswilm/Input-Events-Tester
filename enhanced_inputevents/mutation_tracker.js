@@ -93,9 +93,10 @@ export class MutationTracker{
 				// Note: methods like replaceWith or replaceChildren will have both added and removed nodes
 				let removed_ref = r.previousSibling;
 				if (r.addedNodes.length){
+					const added_ref = r.removedNodes[0] || r.nextSibling;
 					let prev = r.previousSibling;
 					for (const cur of r.addedNodes){
-						this.add(cur, r.target, prev, r.nextSibling);
+						this.add(cur, r.target, prev, added_ref);
 						prev = cur;
 					}
 					removed_ref = prev;

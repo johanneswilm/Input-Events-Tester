@@ -75,11 +75,14 @@ class CachedDOM{
 				return `differing attribute ${k}: ${tv} vs ${ov}`;
 		}
 		// recurse on children
-		let l = Math.max(this.children.length, other.children.length);
-		for (let i=(forward ? 0 : l-1); forward ? i<l : i>=0; forward ? i++ : i--){
-			let a = this.children[i];
-			let b = other.children[i];
-			stack.push({a,b,index:i});
+		const delta = forward ? 1 : -1;
+		let ai = forward ? 0 : this.children.length-1;
+		let bi = forward ? 0 : other.children.length-1;
+		while (true){
+			const a = this.children[ai];
+			const b = other.children[bi];
+			if (!a && !b) break;
+			stack.push({a,b,ai,bi});
 			if (!a)
 				return "a is missing a child node";
 			if (!b)
@@ -88,6 +91,8 @@ class CachedDOM{
 			if (msg)
 				return msg;
 			stack.pop();
+			ai += delta;
+			bi += delta;
 		}
 	}
 }
@@ -136,6 +141,7 @@ class Tester{
 		this.range = this.tracker.range(this.root);
 		this.tracker.revert();
 		this.dom_reverted = new CachedDOM(this.root);
+		console.log("stopped, reverted:", this.dom_reverted);
 		// check mutated
 		if (true){
 			let fdiff = this.dom_original.diff(this.dom_mutated);
@@ -157,12 +163,12 @@ class Tester{
 				// TODO: range calculation is incorrect, debug
 				let mr = new MutatedRange();
 				let sel = fdiff.at(-2).a;
-				let sidx = fdiff.at(-1).index;
+				let sidx = fdiff.at(-1).ai;
 				if (!sidx)
 					mr.setStart(sel.node, false);
 				else mr.setStart(sel.children[sidx-1].node, true);
 				let eel = bdiff.at(-2).a;
-				let eidx = bdiff.at(-1).index;
+				let eidx = bdiff.at(-1).ai;
 				if (eidx >= eel.children.length-1)
 					mr.setEnd(eel.node, false);
 				else mr.setEnd(eel.children[eidx+1].node, true);
@@ -263,7 +269,8 @@ function randomized_tests({
 	}
 	// DOM tree ops:
 	// element (except root) or text: remove-0, replaceWith-1, before-2, after-3
-	// elment only: replaceChildren-4, prepend-5, append-6
+	// elment only: replaceChildren-4, prepend-5, append-
+	// TODO: if no can't replaceWith/before/after if it is its own root node (disconnected dom tree)
 	const ops = ["remove","replaceWith","before","after","replaceChildren","prepend","append"];
 	// create nodes
 	let root = node();
@@ -357,7 +364,7 @@ document.addEventListener("DOMContentLoaded", e => {
 	let [A,B,C] = nodes(3);
 	root.append(A,B,C);
 
-	//*/ test 1
+	/*/ test 1
 	t.start(root);
 	root.append(A); // BCA
 	root.prepend(C); // CBA
@@ -366,7 +373,7 @@ document.addEventListener("DOMContentLoaded", e => {
 	t.check_revert(1);
 	//*/
 
-	//*/ test 2
+	/*/ test 2
 	t.start(root);
 	root.append(A); // BCA
 	root.append(B); // CAB
@@ -375,7 +382,7 @@ document.addEventListener("DOMContentLoaded", e => {
 	t.check_revert(2);
 	//*/
 
-	//*/ test 3
+	/*/ test 3
 	t.start(root);
 	root.append(A); // BCA
 	root.append(B); // CAB
@@ -384,14 +391,14 @@ document.addEventListener("DOMContentLoaded", e => {
 	t.check_revert(3);
 	//*/
 
-	/*
+	//*
 	randomized_tests({
 		sample_count: 1,
 		element_count: 2,
 		text_count: 1,
 		data_count: 3,
 		init_op_count: 3,
-		op_count: 3,
+		op_count: 1,
 		insert_max: 1,
 		prop_chance: .15
 	})
