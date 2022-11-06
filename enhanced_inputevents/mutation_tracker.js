@@ -210,17 +210,14 @@ export class MutationTracker{
 			nit.next();
 			const prev_fixed = !pit.value.floating;
 			const next_fixed = !nit.value.floating;
+			// one is fixed and the other floating; the floating is a candidate to become fixed
 			if (prev_fixed != next_fixed){
-				let it, dir;
 				if (prev_fixed){
-					it = nit;
-					dir = "prev";
+					if (pit.value.node === nit.value.floating.prev)
+						this.#mark_fixed(nit.value.node, nit, "prev", true);
 				}
-				else{
-					it = pit;
-					dir = "next";
-				}
-				this.#mark_fixed(it.value.node, it, dir, true);
+				else if (nit.value.node === pit.value.floating.next)
+					this.#mark_fixed(pit.value.node, pit, "next", true);
 			}
 		}
 		// (optional) prev<->next relationship may be restored
@@ -241,14 +238,16 @@ export class MutationTracker{
 	 */
 	*#traverse_proper_children(parent, node, dir, inclusive){
 		const it = this.mutated_graph.traverse(node, dir, inclusive);
+		let i = 0;
 		for (const node of it){
+			if (++i > 100)
+				throw Error("infinite child traversal");
 			if (node){
 				const op = this.floating.get(node);
 				if (op){
-					// wrong parent
-					if (op.parent !== parent)
-						continue;
-					yield {node, floating: op};
+					// skip if parent incorrect
+					if (op.parent === parent)
+						yield {node, floating: op};
 					continue;
 				}
 			}
@@ -355,7 +354,7 @@ export class MutationTracker{
 				if (root.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_CONTAINED_BY)
 					return true;
 			for (const [node,op] of this.floating.entries()){
-				// rather than check prev/next siblings, we just check parent instead; parent == root is okay
+				// we can just check parent here; parent == root is okay
 				if (op.parent && root.contains(op.parent) || node.parentNode && root.contains(node.parentNode))
 					return true;
 			}
@@ -400,43 +399,26 @@ export class MutationTracker{
 				sr.selectNode(node);
 				union();
 			}
-			/* previous position; A little tricky, since its siblings may have moved around,
-				in which case the range will extend to *their* siblings. Since they may have
-				moved, we can't just define a range from prev to next, as that range may not
-				be valid. Better to just treat the prev/next endpoints by themselves (as a
-				collapsed range)
+			/* Original position: Only care about fixed nodes when marking the original bounds.
+				If prev/next bounds have been moved, then the bounds get extended to *their* siblings,
+				so we delegate the bound extension to those siblings instead. Eventually, a fixed
+				node will be found that is a candidate.
 			*/
 			const p = op.parent;
 			if (p){
-				const prev = op.prev, next = op.next;
-				const include_parent = !root || !(prev && next) && root.contains(p);
-				// after prev
-				if (prev){
-					if (prev.parentNode && include(prev)){
-						sr.setStart(prev, true, true);
-						union();
-					}
-				}
-				// start of parent
-				else if (include_parent){
-					sr.setStart(p, false, true);
-					union();
-				}
-				// before next
-				if (next){
-					if (next.parentNode && include(next)){
-						sr.setEnd(next, true, true);
-						union();
-					}
-				}
-				// end of parent
-				else if (include_parent){
-					// if no children, may have already done this anchor in !prev branch
-					if (p.firstChild || prev){
-						sr.setEnd(p, false, true);
-						union();
-					}
-				}
+				const prev_fixed = !op.prev || !this.floating.has(op.prev);
+				const next_fixed = !op.next || !this.floating.has(op.next);
+				if (!prev_fixed && !next_fixed)
+					continue;
+				// parent == root okay in this case
+				if (root && !root.contains(p))
+					continue;
+				// if we only have one side, we collapse; the other side will be handled later by another node
+				if (prev_fixed)
+					sr.setStart(op.prev || p, Boolean(op.prev), !next_fixed);
+				if (next_fixed)
+					sr.setEnd(op.next || p, Boolean(op.next), !prev_fixed);
+				union();
 			}
 		}
 		return fr;
@@ -463,121 +445,72 @@ export class MutationTracker{
 		}
 		this.props.clear();
 		// revert DOM positions
-		/* First we categorize nodes by parent, linking adjacent nodes together. Linking adjacents
-			is essential; it defines the order of movements to get a valid result, which also lets
-			us batch the movements.
-
-			parents: Map(parent => {
-				// This is just indexing by each object's next and prev values
-				"next"/"prev": Map(
-					next/prev excluding null prev => {
-						nodes: doubly linked list of nodes to be inserted
-						next: node to insert before
-						prev: node to insert after
-					}
-				)
-			})
+		/* Order of node movements can matter:
+			1. If a node will be inserted next to a sibling, but that sibling is floating, the sibling
+				needs to be resolved first. We can easily handle this by linking up nodes by their
+				prev/next siblings and inserting them as a group.
+			2. The order we process parents matters when an ancestor has become a descendant of its
+				descendant. In this case you'll get an error, "new child is an ancestor of the parent"
+				Determining the ordering of parents is complex, since we need to check descendants/ancestors
+				both in the current position, and possibly in the new position. I cannot think of an efficient
+				algorithm to do it currently. An alternative is simply to remove those descendants first
+				(which is feasible, albeit with non-negligble overhead), thus severing the problematic ancestor
+				connection. An even simpler alternative is just to remove all floating nodes. Every node
+				insertion requires a removal first, so this is what the browser is going to do anyways. The only
+				reason to try to discover the parent ordering is to optimize a remove+append into a single
+				append. Given the complexity of computing the parent ordering, the overhead for that does
+				not seem worth it; even determining *which* parents should be removed is costly. So we'll just
+				remove all nodes to make parent ordering irrelevant.
 		*/
-		const parents = new Map();
 		for (const [node,op] of this.floating.entries()){
-			// node removals
-			if (!op.parent){
-				node.remove();
+			// remove nodes to handle ancestor-child ordering
+			node.remove();
+			if (!op.parent)
 				continue;
-			}
-			// node reposition
-			let pnodes = parents.get(op.parent);
-			if (!pnodes){
-				pnodes = {next: new Map(), prev: new Map()};
-				parents.set(op.parent, pnodes);
-			}
-			/* check if we can prepend/append this node to an existing list;
-				if there is just a single node in-between two inserts, let's absorb
-				it into the inserts; e.g. [AB],C,[DE], becomes a single insert [ABCDE]; you
-				could absorb longer strings of nodes, but that would take extra work to detect
-			*/
-			let pst_absorb = false,
-				pre_absorb = false,
-				// [pst_op, node]
-				pst_op = pnodes.next.get(node),
-				// [node, pre_op]
-				pre_op = pnodes.prev.get(node);
-			if (!pst_op && op.prev){
-				// [pst_op, op.prev, node]
-				pst_op = pnodes.next.get(op.prev);
-				if (pst_op){
-					pst_absorb = true;
-					// could be a floating node we haven't seen yet
-					this.floating.delete(op.prev);
+			const linked = [node];
+			op.linked = linked;
+			// walk through prev/next and link up any ones that are floating as well
+			const link_siblings = (dir, arrfn) => {
+				arrfn = linked[arrfn].bind(linked);
+				let bop = op, bop_next, link;
+				while (true){
+					if (!(link = bop[dir]) || !(bop_next = this.floating.get(link))){
+						// inherit the linked ops prev/next
+						op[dir] = link;
+						break;
+					}
+					// we'll take over handling the node
+					this.floating.delete(link);
+					arrfn(link);
+					// remove nodes to handle ancestor-child ordering
+					link.remove();
+					bop = bop_next;
 				}
 			}
-			if (!pre_op && op.next){
-				// [node, op.next, pre_op]
-				pre_op = pnodes.prev.get(op.next);
-				if (pre_op){
-					pre_absorb = true;
-					// could be a floating node we haven't seen yet
-					this.floating.delete(op.next);
-				}
-			}
-			// add to existing list
-			if (pst_op){
-				pnodes.next.delete(pst_op.next);
-				if (pst_absorb)
-					pst_op.nodes.push(op.prev);
-				pst_op.nodes.push(node);
-				// this node links up two lists;
-				// [pst_op, (op.prev), node, (op.next), pre_op]
-				if (pre_op){
-					pnodes.prev.delete(pre_op.prev);
-					if (pre_absorb)
-						pst_op.nodes.push(op.next);
-					pst_op.nodes.push(...pre_op.nodes)
-					pst_op.next = pre_op.next;
-				}
-				else pst_op.next = op.next;
-				pnodes.next.set(pst_op.next, pst_op);
-			}
-			else if (pre_op){
-				pnodes.prev.delete(pre_op.prev);
-				if (pre_absorb)
-					pre_op.nodes.unshift(op.next);
-				pre_op.nodes.unshift(node);
-				pre_op.prev = op.prev;
-				if (pre_op.prev)
-					pnodes.prev.set(pre_op.prev, pre_op);
-			}
-			// can't link to any list currently
-			else{
-				const new_op = {nodes: [node], prev: op.prev, next: op.next};
-				pnodes.next.set(new_op.next, new_op);
-				if (new_op.prev)
-					pnodes.prev.set(new_op.prev, new_op);
-			}
+			link_siblings("prev", "unshift");
+			link_siblings("next", "push");
 		}
-		this.floating.clear();
-		/* If nodes are already inside the correct parent, you could reduce the number
-			of moves. E.g. [BCA], assuming all have moved, can be optimized to a single
-			movement of A, rather than setting child list to [ABC]. However, I think
-			detecting this kind of optimization will end up being more computation than
-			just moving all the children. So we won't optimize node ops any further
+		/* If nodes are already inside the correct parent, you could reduce the number of moves. E.g. [BCA],
+			assuming all have moved, can be optimized to a single movement of A, rather than setting child
+			list to [ABC]. Another might be combining two inserts into one by reinserting any nodes between,
+			e.g. [AB],CD,[EF] -> [ABCDEF]. However, I think detecting this kind of optimization will end up
+			being more computation than just moving all the children. So we won't optimize node ops any further.
 		*/
 		// perform node movements
-		for (const [parent,graph] of parents.entries()){
-			for (const op of graph.next.values()){
-				if (op.next)
-					op.next.before(...op.nodes);					
-				else parent.append(...op.nodes);
-			}
+		for (const op of this.floating.values()){
+			if (op.next)
+				op.next.before(...op.linked);
+			else op.parent.append(...op.linked);
 		}
+		this.floating.clear();
 	}
 
 	/** Clear the internal log of mutations, effectively "committing" the current DOM */
 	clear(){
-		this.props.clear();
-		this.floating.clear();
 		this.mutated_graph.clear();
 		this.original_graph.clear();
+		this.props.clear();
+		this.floating.clear();
 	}
 }
 
