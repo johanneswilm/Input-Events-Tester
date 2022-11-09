@@ -27,7 +27,7 @@ class CachedDOM{
 		this.node = node;
 		this.children = [];
 		this.attrs = {};
-		if (node.nodeType instanceof CharacterData){
+		if (node instanceof CharacterData){
 			this.attrs.data = node.data;
 			if (node.childNodes.length)
 				throw Error("assertion: CharacterData should not have children");
@@ -95,6 +95,33 @@ class CachedDOM{
 			bi += delta;
 		}
 	}
+	pretty_print(tabs=0){
+		let str = "";
+		function add_tabs(){
+			for (let i=0; i<tabs; i++)
+				str += "   ";
+		}
+		add_tabs();		
+		if (this.node.nodeType === Node.TEXT_NODE)
+			str += `#${this.attrs.data}`;
+		else{
+			let tag = this.node.tagName.toLowerCase()+this.node.uid;
+			str += `<${tag}`;
+			for (let [k,v] of Object.entries(this.attrs)){
+				if (v !== null)
+					str += ` ${k}='${v}'`;
+			}
+			str += '>';
+			if (this.children.length){
+				str += '\n';
+				for (let child of this.children)
+					str += child.pretty_print(tabs+1)+'\n';
+				add_tabs();
+			}
+			str += `</${tag}>`;
+		}
+		return str;
+	}
 }
 
 /** Helper class to run tests
@@ -103,14 +130,17 @@ class CachedDOM{
  *		If failed, dom_[original, mutated, reverted], range, and mutated can be examined
  */
 class Tester{
-	constructor(){
+	constructor(verbose=false){
+		this.verbose = verbose;
 		this.dom_original = null;
 		this.tracker = new MutationTracker();
 		this.observer = new MutationObserver(this.record.bind(this, null));
 	}
 	record(records){
-		for (let r of records)
+		for (let r of records){
+			// console.log(r);
 			this.tracker.record(r);
+		}
 	}
 	/** Start tracking/observing root */
 	start(root){
@@ -126,7 +156,7 @@ class Tester{
 			characterData: true, 
 			characterDataOldValue: true,
 		});
-		console.log("starting, original:", this.dom_original);
+		this.verbose && console.log("starting, original:\n", this.dom_original.pretty_print());
 	}
 	/** Start tracking/observing previously set root */
 	stop(){
@@ -134,14 +164,14 @@ class Tester{
 		this.observer.disconnect();
 	}
 	/** Try reverting and see if it works */
-	check_revert(name){
+	check_revert(name, verbose = false){
 		this.dom_mutated = new CachedDOM(this.root);
-		console.log("stopping, mutated:", this.dom_mutated);
+		this.verbose && console.log("stopping, mutated:\n", this.dom_mutated.pretty_print());
 		this.mutated = this.tracker.mutated(this.root);
 		this.range = this.tracker.range(this.root);
 		this.tracker.revert();
 		this.dom_reverted = new CachedDOM(this.root);
-		console.log("stopped, reverted:", this.dom_reverted);
+		this.verbose && console.log("stopped, reverted:\n", this.dom_reverted.pretty_print());
 		// check mutated
 		if (true){
 			let fdiff = this.dom_original.diff(this.dom_mutated);
@@ -196,7 +226,7 @@ class Tester{
 // For reproducible randomized tests:
 // copied from here: https://stackoverflow.com/questions/521295
 const seed = cyrb128("mutations");
-const random = xoshiro128ss(seed[0], seed[1], seed[2], seed[3]);
+const random = xoshiro128ss(...seed);
 function cyrb128(str) {
     let h1 = 1779033703, h2 = 3144134277,
         h3 = 1013904242, h4 = 2773480762;
@@ -214,13 +244,29 @@ function cyrb128(str) {
     return [(h1^h2^h3^h4)>>>0, (h2^h1)>>>0, (h3^h1)>>>0, (h4^h1)>>>0];
 }
 function xoshiro128ss(a, b, c, d) {
-    return function() {
+    const gen = () => {
         var t = b << 9, r = a * 5; r = (r << 7 | r >>> 25) * 9;
         c ^= a; d ^= b;
         b ^= c; a ^= d; c ^= t;
         d = d << 11 | d >>> 21;
         return (r >>> 0) / 4294967296;
-    }
+    };
+	gen.getSeed = () => [a,b,c,d];
+	// set seed from four ints, an array of four ints, or a string
+	const setSeed = gen.setSeed = (na, nb, nc, nd) => {
+		if (Array.isArray(na))
+			[a,b,c,d] = na;
+		else if (typeof na === "string")
+			[a,b,c,d] = cyrb128(na);
+		else{
+			a = na;
+			b = nb;
+			c = nc;
+			d = nd;
+		}
+	}
+	gen.randomSeed = () => setSeed(String(Math.random()));
+	return gen;
 }
 
 /** Generates a random DOM tree, randomly mutates the DOM, and then tests if mutations/range 
@@ -235,14 +281,19 @@ function xoshiro128ss(a, b, c, d) {
  * @param op_count how many node ops to perform as mutations on the initialized DOM
  * @param insert_max max number of nodes to insert in a single operation
  * @param prop_chance [0,1] probability we will modify a property; otherwe we do a node operation
+ * @param verbose verbose logging
  */
 function randomized_tests({
-	sample_count, element_count, text_count, data_count, init_op_count, op_count, insert_max, prop_chance
+	sample_count, element_count, text_count, data_count, init_op_count,
+	op_count, insert_max, prop_chance, verbose
 }){
 	// random integer, max is exclusive
 	function random_int(max){ return Math.floor(random()*max); }
 	// random text data
 	function random_data(){ return String(random_int(data_count)); }
+	function set_data(txt, val){
+		txt.data = `txt${txt.uid}-${val}`;
+	}
 	// random array value
 	function random_val(arr){ return arr[random_int(arr.length)]; }
 	// in-palace shuffle array
@@ -255,7 +306,7 @@ function randomized_tests({
 		}
 	}
 	// sample from an array without replacement
-	function* sample(a, exclude){
+	function* sample(a){
 		for (let i = a.length - 1; i >= 0; i--) {
 			const j = random_int(i+1);
 			if (i != j){
@@ -263,63 +314,94 @@ function randomized_tests({
 				a[i] = a[j];
 				a[j] = x;
 			}
-			if (!exclude.has(a[i]))
-				yield a[i];
+			yield a[i];
 		}
 	}
-	// DOM tree ops:
-	// element (except root) or text: remove-0, replaceWith-1, before-2, after-3
-	// elment only: replaceChildren-4, prepend-5, append-
-	// TODO: if no can't replaceWith/before/after if it is its own root node (disconnected dom tree)
-	const ops = ["remove","replaceWith","before","after","replaceChildren","prepend","append"];
-	// create nodes
-	let root = node();
-	let els = nodes(element_count);
-	let txts = [];
+	// create nodes; don't use randomness here, so that each test can be reproducible by
+	// setting random seed to what it was at the start of the test
+	const root = node();
+	const els = nodes(element_count);
+	const txts = [];
 	while (txts.length != text_count)
-		txts.push(text(random_data()));
-	let merged = [...els, ...txts];
+		txts.push(text("0"));
+	const merged = [...els, ...txts];
+	// DOM tree ops:
+	// element or text that is not its own root: remove-0, replaceWith-1, before-2, after-3
+	// elment only: replaceChildren-4, prepend-5, append-6
+	const ops = ["remove","replaceWith","before","after","replaceChildren","prepend","append"];
 	// begin tests
-	let test = new Tester();
+	function log_full(name){
+		console.log(`${name} ----------------`);
+		let roots = new Set([root]);
+		for (let m of merged)
+			roots.add(m.getRootNode());
+		for (let r of roots)
+			console.log((new CachedDOM(r)).pretty_print())
+		console.log("----------------------")
+	}
+	let test = new Tester(verbose);
 	for (let iter=0; iter<sample_count; iter++){
+		verbose && console.log(`random test sample ${iter}, seed:`, random.getSeed());
+		// reset DOM
+		for (let m of merged){
+			m.remove();
+			if (m.nodeType === Node.TEXT_NODE)
+				set_data(m, 0);
+			else m.removeAttribute("class");
+		}
+		const shuffled = Array.from(merged);
 		// initialize DOM; randomly insert into root
 		root.replaceChildren();
-		shuffle(merged);
+		shuffle(shuffled);
 		let avail = [root];
-		for (let m of merged){
+		for (let m of shuffled){
 			random_val(avail).append(m);
 			if (m.nodeType != Node.TEXT_NODE)
 				avail.push(m);
+			// random text
+			else set_data(m, random_data());
 		}
 		// random mutations
+		let started = false;
 		for (let i=0; i<init_op_count+op_count; i++){
 			if (i == init_op_count){
+				started = true;
 				test.start(root);
+				log_full("start");
 			}
 			let p = random();
 			// modify property
 			if (p <= prop_chance){
-				const node = random_val(merged);
+				const node = random_val(shuffled);
 				if (node.nodeType == Node.TEXT_NODE)
-					node.data = random_data();
+					set_data(node, random_data());
 				else node.setAttribute("class", "x"+random_data());
-				console.log("prop", node);
+				verbose && started && console.log("prop", node);
 			}
 			// modify DOM tree
 			else{
 				const op = random_int(7);
 				const insert = [];
-				let node;
-				if (op <= 3)
-					node = random_val(merged);
+				let node = null;
+				if (op <= 3){
+					for (const n of sample(shuffled)){
+						if (n.getRootNode() !== n){
+							node = n;
+							break;
+						}
+					}
+				}
 				else{
 					let idx = random_int(els.length+1);
 					node = !idx ? root : els[idx-1];
 				}
+				if (node === null)
+					continue;
 				// gather a list of nodes to insert with this op
 				if (op){
 					// operation cannot operate on any ancestor
 					const ancestors = new Set();
+					// and these ops specifically can't work on themselves
 					if (op > 3)
 						ancestors.add(node);
 					let p = node;
@@ -327,14 +409,17 @@ function randomized_tests({
 						ancestors.add(p);
 					ancestors.delete(root);
 					// draw samples
-					const limit = Math.min(merged.length-ancestors.size, insert_max);
+					const limit = Math.min(shuffled.length-ancestors.size, insert_max);
 					const insert_count = random_int(limit+1);
-					for (const n of sample(merged, ancestors)){
+					for (const n of sample(shuffled)){
+						if (ancestors.has(n))
+							continue;
 						if (insert.push(n) >= insert_count)
 							break;
 					}
 				}
-				console.log(ops[op], node, insert);
+				if (verbose && started)
+					console.log(ops[op], node, insert);
 				// perform op
 				let has_err = false;
 				let problematic = null;
@@ -351,8 +436,11 @@ function randomized_tests({
 					console.error(problematic)
 					throw Error("bad op");
 				}
+				if (verbose && started)
+					log_full("op");
 			}
 		}
+		log_full("stop");
 		test.stop();
 		test.check_revert(`random_sample_${iter}`);
 	}
@@ -392,15 +480,19 @@ document.addEventListener("DOMContentLoaded", e => {
 	//*/
 
 	//*
+	
+	random.setSeed(1141043334, 241951857, 1642652061, -1418154287);
+	// random.randomSeed();
 	randomized_tests({
-		sample_count: 1,
+		sample_count: 300,
 		element_count: 2,
 		text_count: 1,
 		data_count: 3,
 		init_op_count: 3,
-		op_count: 1,
+		op_count: 3,
 		insert_max: 1,
-		prop_chance: .15
+		prop_chance: .15,
+		verbose: true
 	})
 	//*/
 });

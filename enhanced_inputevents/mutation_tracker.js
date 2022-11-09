@@ -1,22 +1,5 @@
 import { MutatedRange } from "./mutated_range.js";
 
-/** Cleaner interface, in my opinion, for iterating in a resumable manner.
- * @param it an iterator
- * @returns a resumable iterator object; use like so:
- * ```
- *		while(it.next()){ it.value };
- * ```
- */
-function resumable(it){
-	let out = {};
-	out.next = () => {
-		const n = it.next();
-		out.value = n.value;
-		return !out.done;
-	};
-	return out;
-}
-
 /** Tracks mutations performed on the DOM, allowing DOM to be reverted to its
  * 	initial state, or a Range to be queried with the extent of DOM mutations.
  * 
@@ -39,15 +22,8 @@ function resumable(it){
  */
 export class MutationTracker{
 	constructor(){
-		/* Node property changes:
-			node => {
-				native: Map(attr_name => original attribute value),
-					null attribute name is used for character data
-				custom: Map(custom_key => original custom value)
-				size: native.size + custom.size
-			}
-		*/
-		this.props = new Map();
+		// Node property changes: node => PropertyCache
+		this.props = new PropertyCache();
 		/* Floating nodes, e.g. those whose position has changed:
 			node => {
 				parent: original parent, or null if original parent is untracked (e.g. new node)
@@ -65,6 +41,11 @@ export class MutationTracker{
 			all siblings, just the ones affected by a mutation. As MutationRecords are batched,
 			the siblings at the time of a record may be behind the actual next/previousSiblings.
 			This graph is used to detect when a node returns to its original position.
+
+			TODO: Think about how to trim mutated_graph when a part of the DOM reverts to its
+				original position; currently, the mutated_graph could grow to the full size of
+				the DOM, even if this.floating is empty. I think you just remove from mutated_graph
+				when there are two new fixed siblings adjacent to eachother
 		*/
 		this.mutated_graph = new SiblingGraph();
 	}
@@ -85,33 +66,20 @@ export class MutationTracker{
 				this.data(r.target, r.oldValue);
 				break;
 			case "childList":
-				/* We could make add/remove methods take a batch of nodes to match MutationRecord
-					interface. A lot of add/remove logic is individual though, and batching only
-					assists in a couple places... and there, it would greatly increase complexity
-					of the code. So I don't think its worth doing a batched version
+				/* Coud make a batched add/remove method, which might help reduce some computation 
+					with detecting when a node's position has been reverted. Won't do it now, since
+					it would greatly increase code complexity.
+
+					Methods like replaceWith or replaceChildren will have both added and removed nodes;
+					Additionally, node.before(node,a,b,c) is valid, and will mean node is in both added
+					and removed lists; removed needs to be processed first
 				*/
-				// Note: methods like replaceWith or replaceChildren will have both added and removed nodes
-				let removed_ref = r.previousSibling;
-				if (r.addedNodes.length){
-					const added_ref = r.removedNodes[0] || r.nextSibling;
-					let prev = r.previousSibling;
-					for (const cur of r.addedNodes){
-						this.add(cur, r.target, prev, added_ref);
-						prev = cur;
-					}
-					removed_ref = prev;
-				}
-				// I think its better to do remove after add, since these removed nodes may be fixed,
-				// and so can help when detecting if an added node returns to its original position
-				if (r.removedNodes.length){
-					let cur = r.removedNodes[0];
-					for (let i=1; i<r.removedNodes.length-1; i++){
-						const next = r.removedNodes[i];
-						this.remove(cur, r.target, removed_ref, next);
-						cur = next;
-					}
-					this.remove(cur, r.target, removed_ref, r.nextSibling);
-				}
+				const rem = r.removedNodes;
+				const add = r.addedNodes;
+				for (let i=0; i<rem.length; i++)
+					this.remove(rem[i], r.target, r.previousSibling, rem[i+1] || r.nextSibling);
+				for (let i=add.length-1; i>=0; i--)
+					this.add(add[i], r.target, r.previousSibling, add[i+1] || r.nextSibling);
 				break;
 		}
 	}
@@ -128,8 +96,11 @@ export class MutationTracker{
 		// record sibling relationship that we went between
 		this.original_graph.maybe_add(prev, next);
 		// add node for the first time; delete to revert
-		if (!op)
+		if (!op){
 			this.floating.set(node, {parent:null});
+			// only used so that maybe_add will see that this node is floating
+			this.original_graph.add(node, null);
+		}
 		else{
 			// detect if node position has been reverted
 			if (parent === op.parent){
@@ -140,7 +111,7 @@ export class MutationTracker{
 				let fixed_candidate = null;
 				/** Searches for a fixed sibling */
 				const find_fixed = (start, dir) => {
-					const it = resumable(this.#traverse_proper_children(parent, start, dir, true));
+					const it = this.#traverse_children(parent, start, dir, true);
 					// iterator will always yield *some* fixed reference before ending, due
 					// to the way we are building mutated_graph
 					while (it.next()){
@@ -162,7 +133,7 @@ export class MutationTracker{
 				if (!fixed)
 					find_fixed(next, "next");
 				// we haven't traversed in the other direction for a possible propogation candidate
-				else fixed_candidate = {node, it: resumable(this.#traverse_proper_children(parent, next, "next", true)), dir: "prev"};
+				else fixed_candidate = {node, it: this.#traverse_children(parent, next, "next", true), dir: "prev"};
 				if (fixed){
 					this.floating.delete(node);
 					if (fixed_candidate)
@@ -200,13 +171,15 @@ export class MutationTracker{
 			this.floating.set(node, {parent, prev: gprev, next: gnext});
 		}
 		// add + remove cancel out
-		else if (!op.parent)
+		else if (!op.parent){
 			this.floating.delete(node);
+			this.original_graph.remove(node, null);
+		}
 		// otherwise, original position was recorded earlier;
 		// removing this node may cause a sibling to be in its reverted position
 		if (!op || op.parent === parent){
-			const pit = resumable(this.#traverse_proper_children(parent, prev, "prev", true));
-			const nit = resumable(this.#traverse_proper_children(parent, next, "next", true));
+			const pit = this.#traverse_children(parent, prev, "prev", true);
+			const nit = this.#traverse_children(parent, next, "next", true);
 			pit.next();
 			nit.next();
 			const prev_fixed = !pit.value.floating;
@@ -237,7 +210,19 @@ export class MutationTracker{
 	 * @yields an object {node, floating}, where node is the child and floating is either null
 	 * 	(child is fixed) or an object with the original position (child is floating)
 	 */
-	*#traverse_proper_children(parent, node, dir, inclusive){
+	#traverse_children(parent, node, dir, inclusive){
+		// This provides a nicer resumable interface
+		const it = this.#traverse_children_gen(parent, node, dir, inclusive);
+		let out = {};
+		out.next = () => {
+			const n = it.next();
+			out.value = n.value;
+			return !out.done;
+		};
+		return out;
+		
+	}
+	*#traverse_children_gen(parent, node, dir, inclusive){
 		const it = this.mutated_graph.traverse(node, dir, inclusive);
 		let i = 0;
 		for (const node of it){
@@ -280,65 +265,40 @@ export class MutationTracker{
 	/** Shared method for tracking attribute and data changes */
 	#prop(node, mode, key, value, old_value){
 		let props = this.props.get(node);
-		// first time seeing this node
 		if (!props){
-			if (old_value === value)
-				return;
-			props = {
-				native: new Map(),
-				custom: new Map(),
-				size: 1 // native.size + custom.size
-			};
+			props = new PropertyCache();
 			this.props.set(node, props);
-			props[mode].set(key, old_value);
-			return;
 		}
-		const map = props[mode];
-		// first time seeing this key;
-		// using has(), in case the value happens to be undefined
-		if (!map.has(key)){
-			if (old_value === value)
-				return;
-			map.set(key, old_value);
-			props.size++;
-		}
-		// prop reverted
-		else if (map.get(key) === value){
-			map.delete(key);
-			// all props reverted
-			if (!--props.size)
-				this.props.delete(node);
-		}
+		props.mark(mode, key, value, old_value)
 	}
-
-	/** Indicate HTML attribute changed
+	/** Indicate HTML attribute changed. Note this uses the current node.getAttribute
+	 * 	value for detecting when the attribute is modified.
 	 * @param {Node} node node whose attribute changed
 	 * @param {String} key namespace qualified attribute name, e.g. "namespace:name"
-	 * @param old_value previous value; on the first call with this key, this should
-	 * 	represent the original value, and is used to detect whether the attribute
-	 * 	change has been reverted; on subsequent calls before reversion, it is ignored
+	 * @param old_value previous value of this attribute; when attribute is first seen, this is
+	 * 	stored as the "original value", and used to detect when the attribute reverts
 	 */
 	attribute(node, key, old_value){
 		return this.#prop(node, "native", key, node.getAttribute(key), old_value);
 	}
-	/** Indicate data change for a CharacterData node
+	/** Indicate data change for a CharacterData node. Note this uses the current node.data
+	 * 	value for detecting when the text is modified.
 	 * @param {Node} node node whose data (text content) changed
-	 * @param old_value previous text content; on the first call with this key, this should
-	 * 	represent the original value, and is used to detect whether the data
-	 * 	change has been reverted; on subsequent calls before reversion, it is ignored
+	 * @param old_value previous text content; when this node's text is first seen, this is
+	 * 	stored as the "original value", and used to detect when the text reverts
 	 */
 	data(node, old_value){
 		// we use null as the key for data
 		return this.#prop(node, "native", null, node.data, old_value);
 	}
 	/** Indicate some custom property for the node has changed. Custom properties are not
-	 * 	automatically reverted; you must provide a callback to revert them yourself
+	 * 	automatically reverted; you must provide a callback to revert them yourself, see `revert()`
 	 * @param {Node} node node whose property changed
 	 * @param key any Map capable object
-	 * @param value current value
-	 * @param old_value previous value; on the first call with this key, this should
-	 * 	represent the original value, and is used to detect whether the property
-	 * 	change has been reverted; on subsequent calls before reversion, it is ignored
+	 * @param value current value for this property; this can be the value several mutations
+	 * 	after `old_value` was read, as would be the case for MutationRecords
+	 * @param old_value previous value of this property; when property is first seen, this is
+	 * 	stored as the "original value", and used to detect when the property reverts
 	 */
 	property(node, key, value, old_value){
 		return this.#prop(node, "custom", key, value, old_value);
@@ -351,8 +311,8 @@ export class MutationTracker{
 	 */
 	mutated(root=null){
 		if (root){
-			for (const node of this.props.keys())
-				if (root.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_CONTAINED_BY)
+			for (const [node,props] of this.props.entries())
+				if (props.dirty && root.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_CONTAINED_BY)
 					return true;
 			for (const [node,op] of this.floating.entries()){
 				// we can just check parent here; parent == root is okay
@@ -361,7 +321,12 @@ export class MutationTracker{
 			}
 			return false;
 		}
-		return Boolean(this.props.size || this.floating.size);
+		if (this.floating.size)
+			return true;
+		for (let props of this.props.values())
+			if (props.dirty)
+				return true;
+		return false;
 	}
 	/** Get a Range indicating bounds of the mutated parts of the DOM. You must call this prior
 	 * 	to `revert`, since reverting resets tracking.
@@ -388,15 +353,15 @@ export class MutationTracker{
 		const include = (node) => {
 			return !root || root.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_CONTAINED_BY;
 		};
-		for (const node of this.props.keys()){
-			if (include(node)){
+		for (const [node,props] of this.props.entries()){
+			if (props.dirty && include(node)){
 				sr.selectNode(node);
 				union();
 			}
 		}
 		for (const [node,op] of this.floating.entries()){
 			// current position
-			if (node.parentNode && !this.props.has(node) && include(node)){
+			if (node.parentNode && !this.props.get(node)?.dirty && include(node)){
 				sr.selectNode(node);
 				union();
 			}
@@ -425,25 +390,18 @@ export class MutationTracker{
 		return fr;
 	}
 
-	/** Revert the DOM to its original state. This also has yields the effects of `clear()`
+	/** Revert the DOM to its original state. This also has yields the effects of `clear()`.
+	 * As noted in `clear()` you may wish to reattach a corresponding MutationObserver.
 	 * @param custom_revert fn(node, key, value), which is called for all custom properties
 	 * 	that were set (see `property()`), and should be used to revert that custom value
 	 */
 	revert(custom_revert=null){
+		// TODO: `root` option
 		this.original_graph.clear();
 		this.mutated_graph.clear();
 		// revert properties
-		for (const [node,props] of this.props.entries()){
-			for (const [attr,val] of props.native){
-				if (attr === null)
-					node.data = val;
-				else node.setAttribute(attr, val);
-			}
-			if (custom_revert){
-				for (const [key,val] of props.custom)
-					custom_revert(node, key, val);
-			}
-		}
+		for (const [node,props] of this.props.entries())
+			props.revert(node, custom_revert);
 		this.props.clear();
 		// revert DOM positions
 		/* Order of node movements can matter:
@@ -466,8 +424,10 @@ export class MutationTracker{
 		for (const [node,op] of this.floating.entries()){
 			// remove nodes to handle ancestor-child ordering
 			node.remove();
-			if (!op.parent)
+			if (!op.parent){
+				this.floating.delete(node);
 				continue;
+			}
 			const linked = [node];
 			op.linked = linked;
 			// walk through prev/next and link up any ones that are floating as well
@@ -506,12 +466,128 @@ export class MutationTracker{
 		this.floating.clear();
 	}
 
-	/** Clear the internal log of mutations, effectively "committing" the current DOM */
+	/** Clear the internal log of mutations, effectively "committing" the current DOM.
+	 * You may also wish to reattach a corresponding MutationObserver, as it can track
+	 * DOM nodes outside root. After clearing/reverting, these disconnected trees do
+	 * not matter anymore.
+	 */
 	clear(){
 		this.mutated_graph.clear();
 		this.original_graph.clear();
 		this.props.clear();
 		this.floating.clear();
+	}
+
+	/** For memory optimization: Returns a value indicating the size of internal storage for
+	 * tracking the mutations. You could use this to trigger periodic reversion/clearing or
+	 * other mutation processing to keep memory low.
+	 */
+	get storage_size(){
+		return this.props.size + this.floating.size + this.original_graph.size + this.mutated_graph.size;
+	}
+	/** For memory optimization: Signals that all mutations have been recorded and the view
+	 * of the DOM given to MutationTracker is up-to-date with the current DOM. This would
+	 * be the case after MutationObserver.takeRecords has been called, for example. This
+	 * allows us to release some cached information about data/attributes/properties. If
+	 * you will call revert/clear immediately, then there is no need to call synchronize.
+	 */
+	synchronize(){
+		for (let [node,props] of this.props.entries()){
+			if (!props.cleanup())
+				this.props.delete(node);
+		}
+	}
+}
+
+/* Holds a record of mutations for attributes, character data, or custom properties.
+ * With MutationRecord, we only get the oldValue, and need to fetch current value from getAttribute/data get.
+ * The lack of point-in-time value means we cannot know if the value is reverted at that point-in-time. We only
+ * are aware of a reversion *after the fact* (e.g. a new MutationRecord.oldValue matches what we had cached).
+ * So unfortunately this means we'll need to cache oldValue in perpetuity, even when the property is reverted.
+ * 
+ * You can use cleanup method to remove all reverted properties, but this should only be done if you
+ * are sure all MutationRecords have been accounted for already, and the PropertyCache has an accurate
+ * view of the current DOM (e.g. when MutationObserver.takeRecords() is called).
+ */
+class PropertyCache{
+	constructor(){
+		/* Each in the form: key => {value, dirty}, where dirty indicates if the value
+			is different than current and needs to be reverted. Native is for attributes
+			and data, with a null key indicating data. Custom is for custom user defined
+			properties.
+		*/
+		this.native = new Map();
+		this.custom = new Map();
+		// number of clean/dirty properties
+		this._clean = 0;
+		this._dirty = 0;
+	}
+	// Total size of the cache
+	get size(){ return this.native.size + this.custom.size; }
+	// Number of dirty properties
+	get dirty(){ return this._dirty; }
+	// Number of clean properties
+	get clean(){ return this._clean; }
+	/** Mark a property for the cache
+	 * @param mode "native" for attribute/data, or "custom" for custom properties
+	 * @param key the attribute name, null for data, or the custom property key
+	 * @param value current value, which may be several mutations ahead of old_value
+	 * @param old_value previous point-in-time value
+	 */
+	mark(mode, key, value, old_value){
+		const m = this[mode];
+		const props = m.get(key);
+		// unseen property
+		if (!props){
+			const dirty = value !== old_value;
+			m.set(key, {value: old_value, dirty});
+			if (dirty)
+				this._dirty++;
+			else this._clean++;
+		}
+		// previously cached; just update dirty flag
+		else{
+			const dirty = value !== props.value;
+			if (dirty != props.dirty){
+				const change = dirty ? 1 : -1;
+				this._dirty += change;
+				this._clean -= change;
+			}
+		}
+	}
+	/** Removes clean properties from the cache, returning a count of dirty properties left */
+	cleanup(){
+		for (const [attr,o] of this.native.values())
+			if (!o.dirty)
+				this.native.delete(attr);
+		for (const [key,o] of this.custom.values())
+			if (!o.dirty)
+				this.custom.delete(key);
+		this._clean = 0;
+		this._dirty = this.size;
+		return this._dirty;
+	}
+	/** Reset all dirty properties for a node
+	 * @param node the node to revert properties for
+	 * @param custom_revert fn(node, key, value) callback, which can
+	 * 	revert custom user properties
+	 */
+	revert(node, custom_revert){
+		for (const [attr,o] of this.native.entries()){
+			if (!o.dirty)
+				continue;
+			if (attr === null)
+				node.data = o.value;
+			else if (o.value === null)
+				node.removeAttribute(attr);
+			else node.setAttribute(attr, o.value);
+		}
+		if (custom_revert){
+			for (const [key,o] of props.custom){
+				if (o.dirty)
+					custom_revert(node, key, o.value);
+			}
+		}
 	}
 }
 
@@ -525,6 +601,8 @@ class SiblingGraph{
 		// node -> previousSibling; doesn't encode node = null
 		this._prev = new Map();
 	}
+	/** Size of the graph */
+	get size(){ return Math.max(this._next.size, this._prev.size); }
 	/** Remove all edges from the graph */
 	clear(){
 		this._next.clear();
