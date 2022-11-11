@@ -164,7 +164,7 @@ class Tester{
 		this.observer.disconnect();
 	}
 	/** Try reverting and see if it works */
-	check_revert(name, verbose = false){
+	check_revert(name){
 		this.dom_mutated = new CachedDOM(this.root);
 		this.verbose && console.log("stopping, mutated:\n", this.dom_mutated.pretty_print());
 		this.mutated = this.tracker.mutated(this.root);
@@ -331,17 +331,20 @@ function randomized_tests({
 	const ops = ["remove","replaceWith","before","after","replaceChildren","prepend","append"];
 	// begin tests
 	function log_full(name){
-		console.log(`${name} ----------------`);
+		if (!verbose)
+			return;
+		console.log(`#${name} {`);
 		let roots = new Set([root]);
 		for (let m of merged)
 			roots.add(m.getRootNode());
 		for (let r of roots)
-			console.log((new CachedDOM(r)).pretty_print())
-		console.log("----------------------")
+			console.log((new CachedDOM(r)).pretty_print(1))
+		console.log("}")
 	}
 	let test = new Tester(verbose);
 	for (let iter=0; iter<sample_count; iter++){
-		verbose && console.log(`random test sample ${iter}, seed:`, random.getSeed());
+		const seed = random.getSeed()
+		verbose && console.log(`random test sample ${iter}, seed:`, seed);
 		// reset DOM
 		for (let m of merged){
 			m.remove();
@@ -362,87 +365,80 @@ function randomized_tests({
 			else set_data(m, random_data());
 		}
 		// random mutations
-		let started = false;
-		for (let i=0; i<init_op_count+op_count; i++){
-			if (i == init_op_count){
-				started = true;
-				test.start(root);
-				log_full("start");
-			}
-			let p = random();
-			// modify property
-			if (p <= prop_chance){
-				const node = random_val(shuffled);
-				if (node.nodeType == Node.TEXT_NODE)
-					set_data(node, random_data());
-				else node.setAttribute("class", "x"+random_data());
-				verbose && started && console.log("prop", node);
-			}
-			// modify DOM tree
-			else{
-				const op = random_int(7);
-				const insert = [];
-				let node = null;
-				if (op <= 3){
-					for (const n of sample(shuffled)){
-						if (n.getRootNode() !== n){
-							node = n;
-							break;
+		try{
+			let started = false;
+			for (let i=0; i<init_op_count+op_count; i++){
+				if (i == init_op_count){
+					started = true;
+					test.start(root);
+					log_full("start");
+				}
+				let p = random();
+				// modify property
+				if (p <= prop_chance){
+					const node = random_val(shuffled);
+					if (node.nodeType == Node.TEXT_NODE)
+						set_data(node, random_data());
+					else node.setAttribute("class", "x"+random_data());
+					verbose && started && console.log("prop", node);
+				}
+				// modify DOM tree
+				else{
+					const op = random_int(7);
+					const insert = [];
+					let node = null;
+					if (op <= 3){
+						for (const n of sample(shuffled)){
+							if (n.getRootNode() !== n){
+								node = n;
+								break;
+							}
 						}
 					}
-				}
-				else{
-					let idx = random_int(els.length+1);
-					node = !idx ? root : els[idx-1];
-				}
-				if (node === null)
-					continue;
-				// gather a list of nodes to insert with this op
-				if (op){
-					// operation cannot operate on any ancestor
-					const ancestors = new Set();
-					// and these ops specifically can't work on themselves
-					if (op > 3)
-						ancestors.add(node);
-					let p = node;
-					while (p = p.parentNode)
-						ancestors.add(p);
-					ancestors.delete(root);
-					// draw samples
-					const limit = Math.min(shuffled.length-ancestors.size, insert_max);
-					const insert_count = random_int(limit+1);
-					for (const n of sample(shuffled)){
-						if (ancestors.has(n))
-							continue;
-						if (insert.push(n) >= insert_count)
-							break;
+					else{
+						let idx = random_int(els.length+1);
+						node = !idx ? root : els[idx-1];
 					}
-				}
-				if (verbose && started)
-					console.log(ops[op], node, insert);
-				// perform op
-				let has_err = false;
-				let problematic = null;
-				outer:while (true){
-					try{
-						node[ops[op]](...insert);
-						break outer;
-					} catch(err){
-						problematic = insert.pop();
-						has_err = true;
+					if (node === null)
+						continue;
+					// gather a list of nodes to insert with this op
+					if (op){
+						// operation cannot operate on any ancestor
+						const ancestors = new Set();
+						// and these ops specifically can't work on themselves
+						if (op > 3)
+							ancestors.add(node);
+						let p = node;
+						while (p = p.parentNode)
+							ancestors.add(p);
+						ancestors.delete(root);
+						// draw samples
+						const limit = Math.min(shuffled.length-ancestors.size, insert_max);
+						const insert_count = random_int(limit+1);
+						for (const n of sample(shuffled)){
+							if (ancestors.has(n))
+								continue;
+							if (insert.push(n) >= insert_count)
+								break;
+						}
 					}
+					if (verbose && started)
+						console.log(ops[op], node, insert);
+					// perform op
+					node[ops[op]](...insert);				
+					if (verbose && started)
+						log_full("op");
 				}
-				if (has_err){
-					console.error(problematic)
-					throw Error("bad op");
-				}
-				if (verbose && started)
-					log_full("op");
 			}
+			log_full("stop");
+			test.stop();
+			test.check_revert(`random_sample_${iter}`);
+			log_full("revert");
+		} catch(err){
+			console.error("Random test failed with seed:", seed);
+			console.error(err);
+			throw err;
 		}
-		log_full("stop");
-		test.stop();
-		test.check_revert(`random_sample_${iter}`);
 	}
 }
 
@@ -481,16 +477,16 @@ document.addEventListener("DOMContentLoaded", e => {
 
 	//*
 	
-	random.setSeed(1141043334, 241951857, 1642652061, -1418154287);
+	random.setSeed(402117071, -1746714304, 1101306980, -1985325453);
 	// random.randomSeed();
 	randomized_tests({
-		sample_count: 300,
-		element_count: 2,
-		text_count: 1,
+		sample_count: 1,
+		element_count: 4,
+		text_count: 3,
 		data_count: 3,
 		init_op_count: 3,
-		op_count: 3,
-		insert_max: 1,
+		op_count: 4,
+		insert_max: 3,
 		prop_chance: .15,
 		verbose: true
 	})

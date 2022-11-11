@@ -58,7 +58,7 @@ export class MutationTracker{
 	 */
 	children(removed, added, parent, prev, next){
 		this.tree.mutation(removed, added, parent, prev, next);
-	}	
+	}
 
 	/** Shared method for tracking attribute and data changes */
 	#prop(node, mode, key, value, old_value){
@@ -109,17 +109,20 @@ export class MutationTracker{
 	 */
 	mutated(root=null){
 		if (root){
-			for (const [node,props] of this.props.entries())
+			for (const [node,props] of this.props.entries()){
+				// if node was moved out of root, then we'll catch that later in the tree mutations
 				if (props.dirty && root.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_CONTAINED_BY)
 					return true;
-			for (const op of this.tree.floating.values()){
-				// we can just check parent here; parent == root is okay
-				if (op.original.parent && root.contains(op.original.parent) || op.node.parentNode && root.contains(op.node.parentNode))
+			}
+			for (const op of this.tree.mutations()){
+				// we can just check parent here; parent == root is okay;
+				// if root has been affected, at least one parent out of all mutations will still be contained in root
+				if (op.original && root.contains(op.original.parent) || op.node.parentNode && root.contains(op.node.parentNode))
 					return true;
 			}
 			return false;
 		}
-		if (this.tree.floating.size)
+		if (this.tree.size)
 			return true;
 		for (let props of this.props.values())
 			if (props.dirty)
@@ -157,7 +160,7 @@ export class MutationTracker{
 				union();
 			}
 		}
-		for (const op of this.tree.floating.values()){
+		for (let op of this.tree.mutations()){
 			// current position
 			if (op.node.parentNode && !this.props.get(op.node)?.dirty && include(op.node)){
 				sr.selectNode(op.node);
@@ -173,8 +176,8 @@ export class MutationTracker{
 			op = op.original;
 			const p = op.parent;
 			if (p){
-				const prev_fixed = !op.prev || !this.floating.has(op.prev);
-				const next_fixed = !op.next || !this.floating.has(op.next);
+				const prev_fixed = !op.prev || !this.tree.has(op.prev);
+				const next_fixed = !op.next || !this.tree.has(op.next);
 				if (!prev_fixed && !next_fixed)
 					continue;
 				// parent == root okay in this case
@@ -197,7 +200,7 @@ export class MutationTracker{
 	 * 	that were set (see `property()`), and should be used to revert that custom value
 	 */
 	revert(custom_revert=null){
-		// TODO: `root` option
+		// TODO: `root` option? might be possible if parents are ordered by rootNode or something
 		// revert properties
 		for (const [node,props] of this.props.entries())
 			props.revert(node, custom_revert);
@@ -223,7 +226,7 @@ export class MutationTracker{
 				It could actually save time as well, since it reduces the amount of hierarchy checks the browser
 				has to do on its end.
 		*/
-		for (const op of this.tree.floating.values()){
+		for (let op of this.tree.mutations()){
 			let node = op.node;
 			op = op.original;
 			// remove nodes to handle ancestor-child ordering
@@ -239,7 +242,7 @@ export class MutationTracker{
 				arrfn = linked[arrfn].bind(linked);
 				let bop = op, bop_next, link;
 				while (true){
-					if (!(link = bop[dir]) || !(bop_next = this.tree.floating.get(link))){
+					if (!(link = bop[dir]) || !(bop_next = this.tree.get(link))){
 						// inherit the linked ops prev/next
 						op[dir] = link;
 						break;
@@ -250,6 +253,13 @@ export class MutationTracker{
 					// remove nodes to handle ancestor-child ordering
 					link.remove();
 					bop = bop_next.original;
+					// this can happen when there was an untracked insertion that broke the mutation
+					// graph; the sibling's original values could not be determined; we may still
+					// be able to revert these nodes if there's a reference on the other side we can use
+					if (!bop){
+						op[dir] = undefined;
+						break;
+					}
 				}
 			}
 			link_siblings("prev", "unshift");
@@ -262,11 +272,20 @@ export class MutationTracker{
 			being more computation than just moving all the children. So we won't optimize node ops any further.
 		*/
 		// perform node movements
-		for (let op of this.tree.floating.values()){
+		for (let op of this.tree.mutations()){
 			op = op.original;
-			if (op.next)
-				op.next.before(...op.linked);
-			else op.parent.append(...op.linked);
+			// next/prev are undefined if there were untracked mutations that caused the
+			// original reference position to be unknowable from plain MutationRecords
+			if (op.next !== undefined){
+				if (op.next)
+					op.next.before(...op.linked);
+				else op.parent.append(...op.linked);
+			}
+			else if (op.prev !== undefined){
+				if (op.prev)
+					op.prev.after(...op.linked);
+				else op.parent.prepend(...op.linked);
+			}
 		}
 		this.tree.clear();
 	}
@@ -293,12 +312,16 @@ export class MutationTracker{
 	 * be the case after MutationObserver.takeRecords has been called, for example. This
 	 * allows us to release some cached information about data/attributes/properties. If
 	 * you will call revert/clear immediately, then there is no need to call synchronize.
+	 * 
+	 * This also can resolve untracked add mutations, which allows DOM trees disconnected
+	 * from the root to be reverted correctly.
 	 */
 	synchronize(){
 		for (let [node,props] of this.props.entries()){
 			if (!props.cleanup())
 				this.props.delete(node);
 		}
+		this.tree.synchronize();
 	}
 }
 
@@ -411,6 +434,14 @@ class TreeMutations{
 
 	/** Storage size for mutations */
 	get size(){ return this.floating.size; }
+	/** Check if node position has been modified */
+	has(node){ return this.floating.has(node); }
+	/** Get mutations for a node */
+	get(node){ return this.floating.get(node); }
+	/** Iterate mutated nodes */
+	nodes(){ return this.floating.keys(); }
+	/** Iterate mutations */
+	mutations(){ return this.floating.values(); }
 
 	/** Add a mutation to the tree
 	 * @param {[Node]} removed an ordered list of nodes that were removed
@@ -423,7 +454,7 @@ class TreeMutations{
 		if (!removed.length && !added.length)
 			return;
 		// whether to try to propagate fixedness of `anchors`
-		const propagate = false;
+		let propagate = false;
 		// candidates is a list of MutatedNodes we can propagate fixedness to; can be empty
 		const candidates = [];
 		// anchor nodes marking fixedness propagation points (prev/next indicate corresponding sides of candidates)
@@ -444,10 +475,31 @@ class TreeMutations{
 			fixedness from the ends.
 		*/
 
-		// REMOVED
+		/* Update mutated siblings for next/prev; next/prev may be untracked nodes, and so
+			update will infer siblings in that case, possibly making them tracked nodes
+			(hence, why we do this first, as it allows us to get original position for some extra nodes)
+		*/
+		let siblings_overwritten = false;
+		if (next){
+			const next_mn = this.floating.get(next);
+			if (next_mn){
+				this.mutated.update(next_mn, added[added.length-1] || prev, "prev", parent)
+				siblings_overwritten = true;
+			}
+		}
+		if (prev){
+			const prev_mn = this.floating.get(prev);
+			if (prev_mn){
+				this.mutated.update(prev_mn, added[0] || next, "next", parent);
+				siblings_overwritten = true;
+			}
+		}
+
+		// REMOVED nodes
 		if (removed.length){
 			const fixed = [];
-			for (const node of removed){
+			for (let ri=0; ri<removed.length; ri++){
+				const node = removed[ri];
 				let mn = this.floating.get(node);
 				// (fixed) newly removed; we calculate original positions in batch later
 				if (!mn){
@@ -457,12 +509,15 @@ class TreeMutations{
 				}
 				// (floating) previously moved node
 				else{
-					this.mutated.remove(mn);
+					// could be a remove + remove if there was an untracked add, which is possible with MutationObserver
+					if (siblings_overwritten && (!ri || ri == removed.length-1))
+						this.mutated.remove_safe(mn);
+					else this.mutated.remove(mn);
 					// add + remove cancel out
 					if (!mn.original)
 						this.floating.delete(node);
 					else{
-						mn.mutated = null;
+						mn.untracked = mn.mutated = null;
 						propagate |= mn.original.parent === parent;
 					}
 				}
@@ -474,19 +529,36 @@ class TreeMutations{
 				const fprev = fi != 0;
 				const fnext = fi != l;
 				const mn = fixed[fi];
-				mn.original = {
-					parent,
-					prev: this.#original_sibling(mn.node, fprev ? fixed[fi-1].node : prev, fprev, parent, "prev", "next", anchors),
-					next: this.#original_sibling(mn.node, fnext ? fixed[fi+1].node : next, fnext, parent, "next", "prev", anchors)
-				};
-				this.original.add(mn);
+				const node = mn.node;
+				/* original sibling search may fail when there are breaks in the mutated graph, e.g.
+					when there is an untracked node insertion; to gracefully handle that right now, we're
+					going to omit the original position for that node, meaning it will be removed to revert;
+					this only affects untracked DOM trees, so should be acceptable in most cases
+				*/			
+				const oprev = this.#original_sibling(node, fprev ? fixed[fi-1].node : prev, fprev, parent, "prev", "next", anchors);
+				if (oprev !== undefined){
+					const onext = this.#original_sibling(node, fnext ? fixed[fi+1].node : next, fnext, parent, "next", "prev", anchors);
+					if (onext !== undefined){
+						mn.original = {
+							parent,
+							prev: oprev,
+							next: onext
+						};
+						this.original.add(mn);
+						continue;
+					}
+				}
+				// failed to track this node
+				console.warn("MutationTracker untracked node:", node);
+				mn.untracked = true;
 			}
 		}
 
-		// ADDED
+		// ADDED nodes
 		if (added.length){
-			for (const node of added){
-				const mn = this.floating.get(node);
+			for (let ai=0; ai<added.length; ai++){
+				const node = added[ai];
+				let mn = this.floating.get(node);
 				// newly added
 				if (!mn){
 					mn = new MutatedNode(node);
@@ -495,7 +567,9 @@ class TreeMutations{
 				else{
 					// an add + add will never happen with MutationObserver, but just in case user is doing
 					// something funny, we'll remove any existing sibling links
-					this.mutated.remove(mn);
+					if (siblings_overwritten && (!ai || ai == added.length-1))
+						this.mutated.remove_safe(mn);
+					else this.mutated.remove(mn);
 					// returned to original parent, candidate for becoming fixed
 					if (mn.original.parent === parent)
 						candidates.push(mn);
@@ -511,36 +585,44 @@ class TreeMutations{
 			propagate |= candidates.length;
 		}
 		
-		// Check if these nodes have returned to original position (floating to fixed);
-		// when checking fixedness, we ignore all nodes that would get moved to a different parent.
-		if (propagate){
+		/* Check if these nodes have returned to original position (floating to fixed);
+			when checking fixedness, we ignore all nodes that would get moved to a different parent.
+			If nodes were only removed, candidates will be empty, but there still may be propagation
+			opportunities for prev or next nodes.
+		*/
+		revert_check: if (propagate){
 			// to become fixed there must be a fixed anchor we attach to on at least one side
 			ensure_anchors();
 			// no fixed reference, or nothing to propagate to?
-			const prev_float = anchors.prev.floating;
-			const next_float = anchors.next.floating;
-			if (prev_float && next_float || !candidates.length && prev_float == next_float)
-				return;
+			const propagate_prev = anchors.prev && !anchors.prev.floating;
+			const propagate_next = anchors.next && !anchors.next.floating;
+			if (!propagate_prev && !propagate_next || !candidates.length && propagate_prev == propagate_next)
+				break revert_check;
 			// propagate from prev side
-			const next_fixed = anchors.next.fixed;
 			let next_end_idx = 0;
-			if (!prev_float){
+			if (propagate_prev){
 				next_end_idx = this.#propagate_fixedness(
 					candidates, 0, candidates.length, parent,
-					anchors.prev.fixed, next_float, Boolean(next_fixed), "next", "prev"
+					anchors.prev.fixed, anchors.next?.floating, "next", "prev"
 				);
 				// no need to check next side
 				if (next_end_idx === null)
-					return;
+					break revert_check;
 			}
 			// propagate from next side
-			if (!next_float){
-				// null for fixed argument, since we already processed the prev side
+			if (propagate_next){
 				this.#propagate_fixedness(
 					candidates, candidates.length-1, next_end_idx-1, parent,
-					next_fixed, null, null, "prev", "next"
+					anchors.next.fixed, anchors.prev?.floating, "prev", "next"
 				);
 			}
+		}
+
+		try{
+			this.#assert_valid_graph();
+		} catch(err){
+			console.error("invalid graph");
+			throw err;
 		}
 	}
 
@@ -550,31 +632,37 @@ class TreeMutations{
 	 * @param {"next" | "prev"} forward_dir "next" or "prev", indicating which siblings we want to look for
 	 * @param {"prev" | "next"} backward_dir opposite of forward_dir, the siblings we don't want
 	 * @param {Boolean} stop_floating stop early when we find the "floating" type sibling
-	 * @returns {{fixed: Node | null | undefined, proper: MutatedNode | null}} Two types of anchor nodes
+	 * @returns {{fixed: Node | null | undefined, proper: MutatedNode | null} | null} Two types of anchor nodes
 	 * 
 	 * 	- fixed : the first fixed sibling (in original position); undefined if `stop_floating`
 	 * 		flag was set, and a proper anchor was found first
 	 * 	- floating: the first floating sibling (moved) that is in its correct original parent
 	 * 		(e.g. original parent matches `parent`); null if fixed anchor was found first
+	 * 
+	 *	null is returned if there is a break in the mutated graph that cannot be traversed; e.g, there
+	 *	was an untracked node insertion somewhere
 	 */
 	#anchor_siblings(node, parent, forward_dir, backward_dir, stop_floating){
-		const graph = this.mutated[backward_dir];
 		let floating = null;
 		// null (no sibling) is considered a fixed reference
 		if (!node)
 			return {fixed: null, floating};
 		// node is fixed
-		let mn = graph.get(node);
+		let mn = this.floating.get(node);
 		if (!mn)
 			return {fixed: node, floating};
 		// traverse graph until no sibling can be found;
 		// the final MutatedNode's sibling is the fixed one
+		const graph = this.mutated[backward_dir];
 		while (true){
+			// correct parent, but maybe not position; mark this as the first floating anchor
 			if (!floating && mn.original?.parent === parent){
 				floating = mn;
 				if (stop_floating)
 					return {floating};
 			}
+			if (!mn.mutated)
+				return null;
 			const fixed = mn.mutated[forward_dir];
 			const mn_sibling = fixed ? graph.get(mn.node) : null;
 			if (!mn_sibling)
@@ -587,14 +675,14 @@ class TreeMutations{
 	 * @param {Node} node node we want to find a sibling for
 	 * @param {Node | null} sibling current `forward_dir` sibling of `node`
 	 * @param {Boolean} fixed_hint true if we know that `sibling` is fixed, which can save a
-	 * 	traversal to find th o riginal sibling
+	 * 	traversal to find the original sibling
 	 * @param {Node} parent parent of `node`
 	 * @param {"next" | "prev"} forward_dir "next" or "prev", indicating which siblings we want to look for
 	 * @param {"prev" | "next"} backward_dir opposite of `forward_dir`, the siblings we don't want
 	 * @param anchors an object to store results of any `anchor_siblings()` call to be reused later;
 	 * 	if an original sibling is not currently indexed, and no hint is given, we must traverse the
 	 * 	mutated graph to find one
-	 * @returns {Node | null} the original sibling
+	 * @returns {Node | null | undefined} the original sibling, or undefined if it cannot be determined
 	 */
 	#original_sibling(node, sibling, fixed_hint, parent, forward_dir, backward_dir, anchors){
 		// original recorded by another node op already
@@ -606,7 +694,8 @@ class TreeMutations{
 			return sibling;
 		let a = this.#anchor_siblings(sibling, parent, forward_dir, backward_dir, false);
 		anchors[forward_dir] = a;
-		return a.fixed;
+		// anchor traversal may fail when there are untracked node insertions
+		return a?.fixed;
 	}
 
 	/** Propagate a fixed anchor node to siblings if the siblings are correct. We
@@ -622,13 +711,11 @@ class TreeMutations{
 	 * @param {Node | null} fixed fixed reference to propagate from; sibling of the idx candidate
 	 * @param {MutatedNode | null} floating floating node on the opposite side of `fixed`,
 	 * 	which we can continue propagation if needed; the end_idx sibling
-	 * @param {Boolean} floating_last `floating` is known to be the last node before a fixed one,
-	 * 	so we shouldn't traverse further
 	 * @param {"next" | "prev"} forward_dir propagation direction
 	 * @param {"prev" | "next"} backward_dir opposition of forward_dir
 	 * @returns {Number | null} idx we could not propagate to, or null if all candidates were made fixed
 	 */
-	#propagate_fixedness(candidates, idx, end_idx, parent, fixed, floating, floating_last, forward_dir, backward_dir){
+	#propagate_fixedness(candidates, idx, end_idx, parent, fixed, floating, forward_dir, backward_dir){
 		let mn;
 		// mark a node as fixed and remove from the graph 
 		const mark_fixed = () => {
@@ -653,9 +740,6 @@ class TreeMutations{
 				if (mn.original[backward_dir] !== fixed) 
 					break;
 				mark_fixed();
-				// no need to look for more nodes
-				if (floating_last)
-					return null;
 				// here we filter out nodes which are not in the correct parent
 				do {
 					// sibling is null (end of container), can stop
@@ -670,6 +754,20 @@ class TreeMutations{
 		}
 		return null;
 	}
+
+	// for debugging only
+	#assert_valid_graph(){
+		for (let op of this.mutations()){
+			let v;
+			if (((v = op.original) && (
+					v.prev && this.original.prev.get(v.prev) !== op ||
+					v.next && this.original.next.get(v.next) !== op)) ||
+				((v = op.mutated) && (
+					v.prev && this.mutated.prev.get(v.prev) !== op ||
+					v.next && this.mutated.next.get(v.next) !== op)))
+				throw Error("invalid graph");
+		}
+	}
 }
 
 /** Container for a node's position change */
@@ -680,6 +778,15 @@ class MutatedNode{
 		// a DOM tree whose mutations are not being observed)
 		this.original = null;
 		this.mutated = null;
+		/* Node was inserted into an untracked DOM; we will gradually assemble this.mutated
+			where possible inside this.untracked, and set this.mutated when we know
+			both siblings.
+		*/
+			2. Currently, we determine this.original in a greedy fashion, and so if there
+				are untracked nodes in between that prevent us from knowing immediately
+				what this.original is, we'll set this.untracked = true.
+		*/
+		this.untracked = null;
 	}
 }
 
@@ -694,31 +801,88 @@ class SiblingIndex{
 		this.prev = new Map(); // MutatedNode[mode].prev -> MutatedNode
 		this.next = new Map(); // MutatedNode[mode].next -> MutatedNode
 	}
-	/** Remove a nodes siblings from the index
+	/** Remove a nodes siblings from the index; does not check that
+	 * 	the siblings were indexed prior (use `remove_safe()` for that)
 	 * @param {MutatedNode} node 
 	 */
 	remove(node){
-		const op = node[mode];
+		const op = node[this.mode];
 		if (!op) return;
 		if (op.prev)
 			this.prev.delete(op.prev);
 		if (op.next)
 			this.next.delete(op.next);
 	}
+	/** Same as `remove()`, but checks that `node` was the one that was
+	 * 	indexed before removing; this 
+	 */
+	remove_safe(node){
+		const op = node[this.mode];
+		if (!op) return;
+		if (op.prev && this.prev.get(op.prev) === node)
+			this.prev.delete(op.prev);
+		if (op.next && this.next.get(op.next) === node)
+			this.next.delete(op.next);
+	}
 	/** Add a nodes siblings to the index
 	 * @param {MutatedNode} node 
 	 */
 	add(node){
-		const op = node[mode]
+		const op = node[this.mode]
 		if (!op) return;
 		if (op.prev)
 			this.prev.set(op.prev, node);
 		if (op.next)
 			this.next.set(op.next, node);
 	}
-	/** Remova all siblings from index */
+	/** Update a node's sibling to another. This is like doing remove + add,
+	 * 	but it only operates on one side. This modifies `node`
+	 * @param {MutatedNode} node the node to update its sibling
+	 * @param {Node | null} sibling the new sibling
+	 * @param {"next" | "prev"} side which sibling to update
+	 * @param {Node} parent parent of `node`, used to to assemble MutatedNode.untracked
+	 */
+	update(node, sibling, side, parent){
+		const op = node[this.mode];
+		// set in untracked instead
+		if (!op){
+			if (!node.untracked)
+				node.untracked = {parent};
+			node.untracked[side] = sibling;
+			// both sides need to be set
+			if (node.untracked[side == "next" ? "prev" : "next"] !== undefined){
+				node.mutated = node.untracked;
+				node.untracked = null;
+				this.add(node);
+			}
+			return;
+		}
+		const old = op[side];
+		if (old === sibling)
+			return;
+		op[side] = sibling;
+		if (old)
+			this[side].delete(old);
+		if (sibling)
+			this[side].set(sibling, node);
+	}
+	/** Remove all siblings from index */
 	clear(){
 		this.prev.clear();
 		this.next.clear();
+	}
+	/** Resolve any untracked adds */
+	synchronize(){
+		for (const op of this.mutations()){
+			const node = op.node;
+			if (!op.mutated && node.parentNode){
+				op.mutated = {
+					parent: node.parentNode,
+					next: node.nextSibling,
+					prev: node.previousSibling
+				}
+				op.untracked = null;
+			}
+		}
 	}
 }
