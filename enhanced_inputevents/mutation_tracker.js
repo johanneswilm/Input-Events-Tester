@@ -461,9 +461,9 @@ class TreeMutations{
 		const anchors = { prev: null, next: null };
 		const ensure_anchors = () => {
 			if (!anchors.prev)
-				anchors.prev = this.#anchor_siblings(prev, parent, "prev", "next", true);
+				anchors.prev = this.anchor_siblings(prev, parent, "prev", "next", true);
 			if (!anchors.next)
-				anchors.next = this.#anchor_siblings(next, parent, "next", "prev", true);
+				anchors.next = this.anchor_siblings(next, parent, "next", "prev", true);
 		};
 
 		/* TODO: Technically the removes and adds can happen in any order, and an added node
@@ -475,29 +475,75 @@ class TreeMutations{
 			fixedness from the ends.
 		*/
 
-		/* Update mutated siblings for next/prev; next/prev may be untracked nodes, and so
-			update will infer siblings in that case, possibly making them tracked nodes
-			(hence, why we do this first, as it allows us to get original position for some extra nodes)
-		*/
-		let siblings_overwritten = false;
-		if (next){
-			const next_mn = this.floating.get(next);
-			if (next_mn){
-				this.mutated.update(next_mn, added[added.length-1] || prev, "prev", parent)
-				siblings_overwritten = true;
-			}
-		}
-		if (prev){
-			const prev_mn = this.floating.get(prev);
-			if (prev_mn){
-				this.mutated.update(prev_mn, added[0] || next, "next", parent);
-				siblings_overwritten = true;
+		// new version with deferred siblings
+		if (removed.length){
+			/*
+				for a mutated node:
+				- if you find a node.next SiblingPromise, find the next fixed node or
+					the next node.prev SiblingProimse, whichever comes first; resolve
+					from that pair
+				- if node.prev SiblingPromise at beginning: resolve (node, next)
+				- if node.next SiblingPromise at end: resolve (prev, node)
+			*/
+			const fixed = [];
+			let first_promise = null;
+			let last_promise = null;
+			for (let ri=0; ri<removed.length; ri++){
+				const node = removed[ri];
+				let mn = this.floating.get(node);
+				// (floating) previously moved node
+				if (mn){
+					let m = mn.mutated;
+					if (m){
+						// case: remove + untracked add + remove;
+						// mark any sibling promises that need to be resolved
+						if (m.prev instanceof SiblingPromise){
+							// joint resolve: promise -> <- promise
+							if (last_promise){
+								last_promise.resolve(m.prev.origin);
+								m.prev.resolve(last_promise.origin);
+								last_promise = null;
+							}
+							// resolve: fixed node <- promise
+							else if (fixed.length)
+								m.prev.resolve(fixed.at(-1));
+							else first_promise = mn.prev;
+						}
+						if (m.next instanceof SiblingPromise)
+							last_promise = mn.next;
+					}
+					this.mutated.remove(mn);
+					// case: add + remove; ops cancel out
+					if (!mn.original)
+						this.floating.delete(node);
+					// case: (remove + add)* + remove
+					else mn.mutated = null;
+				}
+				// (fixed) newly removed; we calculate original positions in batch later
+				else{
+					// resolve: promise -> fixed node
+					if (last_promise){
+						last_promise.resolve(node);
+						last_promise = null;
+					}
+					// case: add
+					mn = new MutatedNode(node);
+					fixed.push(mn);
+					this.floating.set(node, mn);
+				}
 			}
 		}
 
 		// REMOVED nodes
 		if (removed.length){
+			
+
+
+
+
+
 			const fixed = [];
+			let prev_promise = null;
 			for (let ri=0; ri<removed.length; ri++){
 				const node = removed[ri];
 				let mn = this.floating.get(node);
@@ -510,9 +556,7 @@ class TreeMutations{
 				// (floating) previously moved node
 				else{
 					// could be a remove + remove if there was an untracked add, which is possible with MutationObserver
-					if (siblings_overwritten && (!ri || ri == removed.length-1))
-						this.mutated.remove_safe(mn);
-					else this.mutated.remove(mn);
+					this.mutated.remove(mn);
 					// add + remove cancel out
 					if (!mn.original)
 						this.floating.delete(node);
@@ -567,9 +611,7 @@ class TreeMutations{
 				else{
 					// an add + add will never happen with MutationObserver, but just in case user is doing
 					// something funny, we'll remove any existing sibling links
-					if (siblings_overwritten && (!ai || ai == added.length-1))
-						this.mutated.remove_safe(mn);
-					else this.mutated.remove(mn);
+					this.mutated.remove(mn);
 					// returned to original parent, candidate for becoming fixed
 					if (mn.original.parent === parent)
 						candidates.push(mn);
@@ -583,6 +625,18 @@ class TreeMutations{
 				this.mutated.add(mn);
 			};
 			propagate |= candidates.length;
+		}
+
+		// Update mutated siblings for next/prev
+		if (next){
+			const next_mn = this.floating.get(next);
+			if (next_mn)
+				this.mutated.update(next_mn, added[added.length-1] || prev, "prev", parent)
+		}
+		if (prev){
+			const prev_mn = this.floating.get(prev);
+			if (prev_mn)
+				this.mutated.update(prev_mn, added[0] || next, "next", parent);
 		}
 		
 		/* Check if these nodes have returned to original position (floating to fixed);
@@ -642,7 +696,7 @@ class TreeMutations{
 	 *	null is returned if there is a break in the mutated graph that cannot be traversed; e.g, there
 	 *	was an untracked node insertion somewhere
 	 */
-	#anchor_siblings(node, parent, forward_dir, backward_dir, stop_floating){
+	anchor_siblings(node, parent, forward_dir, backward_dir, stop_floating){
 		let floating = null;
 		// null (no sibling) is considered a fixed reference
 		if (!node)
@@ -692,7 +746,7 @@ class TreeMutations{
 		// otherwise, first fixed sibling is the original sibling
 		if (fixed_hint)
 			return sibling;
-		let a = this.#anchor_siblings(sibling, parent, forward_dir, backward_dir, false);
+		let a = this.anchor_siblings(sibling, parent, forward_dir, backward_dir, false);
 		anchors[forward_dir] = a;
 		// anchor traversal may fail when there are untracked node insertions
 		return a?.fixed;
@@ -757,16 +811,111 @@ class TreeMutations{
 
 	// for debugging only
 	#assert_valid_graph(){
-		for (let op of this.mutations()){
+		for (let mn of this.mutations()){
 			let v;
-			if (((v = op.original) && (
-					v.prev && this.original.prev.get(v.prev) !== op ||
-					v.next && this.original.next.get(v.next) !== op)) ||
-				((v = op.mutated) && (
-					v.prev && this.mutated.prev.get(v.prev) !== op ||
-					v.next && this.mutated.next.get(v.next) !== op)))
+			if (((v = mn.original) && (
+					v.prev && this.original.prev.get(v.prev) !== mn ||
+					v.next && this.original.next.get(v.next) !== mn)) ||
+				((v = mn.mutated) && (
+					v.prev && this.mutated.prev.get(v.prev) !== mn ||
+					v.next && this.mutated.next.get(v.next) !== mn)))
 				throw Error("invalid graph");
 		}
+	}
+
+	/** Resolve node positions for untracked node insertions */
+	synchronize(){
+		for (const mn of this.mutations()){
+			const node = mn.node;
+			if (mn.mutated){
+				if (mn.mutated.prev === undefined)
+					this.mutated.update(mn, node.previousSibling, "prev");
+				else if (mn.mutated.next === undefined)
+					this.mutated.update(mn, node.nextSibling, "next");
+			}
+			else if (node.parentNode){
+				mn.mutated = {
+					parent: node.parentNode,
+					next: node.nextSibling,
+					prev: node.previousSibling
+				}
+				this.mutated.add(mn);
+			}			
+		}
+	}
+}
+
+/** Used as a placeholder to indicate that a node's current, mutated sibling is unknown. The mutated
+ * sibling is only needed when determining a (different) node's original siblings. To facilitate
+ * this use case, the promise object is attached to this "origin" node, the one searching for its
+ * original sibling. Instead of a new promise for each unknown mutated sibling, the promise object
+ * is reused, with the `resume()` method acting like a `then()` callback. When the final original
+ * sibling has been found, `resolve()` is called.
+ */
+class SiblingPromise{
+	/**
+	 * @param {TreeMutations} tree parent mutations we'll traverse over
+	 * @param {MutatedNode} mn the mutated node object we want original siblings for
+	 * @param {"prev" | "next"} forward_dir which sibling this promise is for
+	 * @param {"next" | "prev"} backward_dir opposite of forward_dir
+	 */
+	constructor(tree, mn, forward_dir, backward_dir){
+		this.tree = tree;
+		this.mn = mn;
+		this.forward_dir = forward_dir;
+		this.backward_dir = backward_dir;
+	}
+	/** Node that is searching for its original siblings */
+	get origin(){ return this.mn.node; }
+	/** Resume search for the original sibling
+	 * @param {MutatedNode | Node | null} node the node to resume searching at
+	 * @returns {Boolean} true if the search found results (promise resolved)
+	*/
+	resume(node){
+		/* Note a "promise -> <- promise" resolve case is not possible while traversing in this
+			manner. The reason is that a node's mutated sibling is a SiblingPromise only when the
+			A<->B sibling relationship cannot be determined. So if B.prev is a unknown, A.next will
+			also be unknown, meaning the traversal stops at A.next = SiblingPromise and B.prev =
+			SiblingPromise; neither A nor B knows the other, so the promises can't resolve each
+			other here. Instaed this gets resolved when a batch `mutation()` comes in, revealing
+			A<->B sibling relationship.
+		*/
+		let smn = node;
+		if (!(smn instanceof MutatedNode)){
+			// resolve: promise -> fixed (null)
+			if (node === null){
+				this.resolve(null);
+				return true;
+			}
+			smn = this.tree.floating.get(node);
+		}
+		while (true){
+			// resolve: promise -> fixed (node)
+			if (!smn){
+				this.resolve(node);
+				return true;
+			}
+			// this node had an untracked add, so its sibling is unknown;
+			// we'll need to resume later when its sibling is revealed
+			if (!smn.mutated)
+				smn.mutated = {parent: this.mn.original.parent};
+			const fsibling = smn.mutated[this.forward_dir];
+			if (fsibling === undefined){
+				smn.mutated[this.forward_dir] = this;
+				return false;
+			}
+			// resolve: promise -> fixed (null)
+			if (fsibling === null){
+				this.resolve(null);
+				return true;
+			}
+			smn = this.tree.floating.get(sibling);
+		}
+	}
+	/** Original sibling found */
+	resolve(node){
+		this.mn.original[this.forward_dir] = node;
+		this.tree.original[this.forward_dir].set(node, this.mn);
 	}
 }
 
@@ -774,19 +923,19 @@ class TreeMutations{
 class MutatedNode{
 	constructor(node){
 		this.node = node;
-		// null indicates untracked DOM position (e.g. detached from DOM tree, or in
-		// a DOM tree whose mutations are not being observed)
+		/* null indicates untracked DOM position (e.g. detached from DOM tree, or in a DOM tree
+			whose mutations are not being observed). Otherwise, these are in the form:
+				{parent, next, prev}
+			giving the old or new location of the node
+
+			When there is an untracked insertion, this.mutated will be unknown. In this case,
+			prev/next will be undefined to start. A subsequent mutation may reveal what the mutated
+			position currently is. When the mutated prev/next is requested, but still unknown, it is
+			set to a SiblingPromise, which is essentially a function to be resumed when the sibling
+			becomes known.
+		*/
 		this.original = null;
 		this.mutated = null;
-		/* Node was inserted into an untracked DOM; we will gradually assemble this.mutated
-			where possible inside this.untracked, and set this.mutated when we know
-			both siblings.
-		*/
-			2. Currently, we determine this.original in a greedy fashion, and so if there
-				are untracked nodes in between that prevent us from knowing immediately
-				what this.original is, we'll set this.untracked = true.
-		*/
-		this.untracked = null;
 	}
 }
 
@@ -806,6 +955,7 @@ class SiblingIndex{
 	 * @param {MutatedNode} node 
 	 */
 	remove(node){
+		// TODO: don't index SiblingPromise?
 		const op = node[this.mode];
 		if (!op) return;
 		if (op.prev)
@@ -813,21 +963,11 @@ class SiblingIndex{
 		if (op.next)
 			this.next.delete(op.next);
 	}
-	/** Same as `remove()`, but checks that `node` was the one that was
-	 * 	indexed before removing; this 
-	 */
-	remove_safe(node){
-		const op = node[this.mode];
-		if (!op) return;
-		if (op.prev && this.prev.get(op.prev) === node)
-			this.prev.delete(op.prev);
-		if (op.next && this.next.get(op.next) === node)
-			this.next.delete(op.next);
-	}
 	/** Add a nodes siblings to the index
 	 * @param {MutatedNode} node 
 	 */
 	add(node){
+		// TODO: don't index SiblingPromise?
 		const op = node[this.mode]
 		if (!op) return;
 		if (op.prev)
@@ -835,28 +975,17 @@ class SiblingIndex{
 		if (op.next)
 			this.next.set(op.next, node);
 	}
-	/** Update a node's sibling to another. This is like doing remove + add,
-	 * 	but it only operates on one side. This modifies `node`
+	/** Update a node's sibling to another. It only operates on one side, and will modify `node`
 	 * @param {MutatedNode} node the node to update its sibling
 	 * @param {Node | null} sibling the new sibling
 	 * @param {"next" | "prev"} side which sibling to update
 	 * @param {Node} parent parent of `node`, used to to assemble MutatedNode.untracked
 	 */
 	update(node, sibling, side, parent){
-		const op = node[this.mode];
-		// set in untracked instead
-		if (!op){
-			if (!node.untracked)
-				node.untracked = {parent};
-			node.untracked[side] = sibling;
-			// both sides need to be set
-			if (node.untracked[side == "next" ? "prev" : "next"] !== undefined){
-				node.mutated = node.untracked;
-				node.untracked = null;
-				this.add(node);
-			}
-			return;
-		}
+		let op = node[this.mode];
+		// there was an untracked node insertion
+		if (!op)
+			op = node[this.mode] = {parent};
 		const old = op[side];
 		if (old === sibling)
 			return;
@@ -866,23 +995,101 @@ class SiblingIndex{
 		if (sibling)
 			this[side].set(sibling, node);
 	}
+
+	#ensure_mutated(mn, dir){
+		if (!mn.mutated)
+			mn.mutated = {parent};
+
+	}
+
+	/**
+	 * 
+	 * @param {Node} parent 
+	 * @param {MutatedNode | node} prev 
+	 * @param {MutatedNode | node} next 
+	 */
+	resolve(parent, prev, next){
+		const mut_prev = prev instanceof MutatedNode;
+		const mut_next = next instanceof MutatedNode;
+		if (!mut_prev && !mut_next)
+			return;
+		// corresponding Node for prev/next
+		const siblings = {
+			prev: mut_prev ? prev.node : prev,
+			next: mut_next ? next.node : next
+		};
+		const promises = {};
+		/** Assigns the `dir` sibling of `mn`, and saves any promise that needs to be resolved */
+		const assign_mutated_sibling = (mn, dir) => {
+			let promise;
+			const sibling = siblings[dir];
+			// mutated not set yet means there was an untracked node insertion;
+			// undefined prev/next indicate that we don't yet know that sibling
+			if (!mn.mutated){
+				mn.mutated = {parent};
+				console.warn("MutationTracker, untracked insertion:", mn);
+			}
+			else{
+				const old = mn.mutated[dir];
+				// promises will need to be resolved later with special logic
+				if (old instanceof SiblingPromise)
+					promises[dir] = promise;
+				// sibling already set, no need to do anything
+				else if (old !== undefined){
+					// optional assertion
+					if (old !== sibling)
+						throw Error("MutationTracker, incorrect mutated sibling");
+					return;
+				}
+			}
+			// mark the new sibling
+			mn.mutated[dir] = sibling;
+			// SiblingPromise / undefined are not stored in the index, so no need to delete
+			this.mutated[dir].set(sibling, mn);
+		}
+		// Update current/mutated siblings
+		if (mut_prev)
+			assign_mutated_sibling(prev, "next");
+		if (mut_next)
+			assign_mutated_sibling(next, "prev");
+		// Promises to resolve?
+		if (!promises.prev && !promises.next)
+			return;
+		/* When there's a promise in both directions, the origins of those promises
+			become the other's resolved value. Since it is a resolve of two promises
+			together, we'll do it here ourselves and have a separate `done()` method
+			to indicate the values have been pre-resolved.
+		*/
+		if (promises.prev && promises.next){
+			// origin of the promises;
+			// siblings.next/prev = origin MutatedNode that needs its original.next/prev value
+			for (const dir in siblings){
+				const g = this.original[dir];
+				const p = promises[dir];
+				siblings[dir] = g.get(p);
+				g.delete(p);
+			}
+			// now set origins as the siblings
+			const assign_original_sibling = (forward_dir, backward_dir) => {
+				const mn = siblings[forward_dir];
+				const sibling = siblings[backward_dir].node;
+				mn.original[forward_dir] = sibling;
+				this.original[forward_dir].set(sibling, mn);
+			};
+			assign_original_sibling("next", "prev");
+			assign_original_sibling("prev", "next");
+			for (let dir in promises)
+				promises[dir].done();
+		}
+		// One sided resolve
+		else{
+			const side = promises.prev ? "prev" : "next";
+			promises[side].resolve(siblings[side]);
+		}
+	}
 	/** Remove all siblings from index */
 	clear(){
 		this.prev.clear();
 		this.next.clear();
-	}
-	/** Resolve any untracked adds */
-	synchronize(){
-		for (const op of this.mutations()){
-			const node = op.node;
-			if (!op.mutated && node.parentNode){
-				op.mutated = {
-					parent: node.parentNode,
-					next: node.nextSibling,
-					prev: node.previousSibling
-				}
-				op.untracked = null;
-			}
-		}
 	}
 }
