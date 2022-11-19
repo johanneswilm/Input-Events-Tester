@@ -1,5 +1,5 @@
 import { MutatedRange } from "./mutated_range.js";
-import { MutationTracker } from "./mutation_tracker.js";
+import { MutationDiff } from "./mutation_diff.js";
 // Helpers for DOM creation
 let uid = 0;
 function node(){
@@ -133,7 +133,7 @@ class Tester{
 	constructor(verbose=false){
 		this.verbose = verbose;
 		this.dom_original = null;
-		this.tracker = new MutationTracker();
+		this.tracker = new MutationDiff();
 		this.observer = new MutationObserver(this.record.bind(this, null));
 	}
 	record(records){

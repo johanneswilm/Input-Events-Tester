@@ -1,28 +1,29 @@
 /** Represents a range bounding mutations. Performing mutations within the bounds will not
- * 	invalidate this range. You can convert this to DOM Range or StaticRange objects, however
- * 	these both could be invalidated by a mutation inside the range. This does not support
- * 	text offsets within CharacterData nodes, as the MutatedRange is tracking the *nodes* that change,
- * 	not the *properties or data* of those nodes.
+ * 	invalidate this range. You can convert this to DOM Range or StaticRange objects, however these
+ * 	both could be invalidated by a mutation inside the range. This does not support text offsets
+ * 	within CharacterData nodes, as the MutatedRange is tracking the *nodes* that change, not the
+ * 	*properties or data* of those nodes.
  * 
  * 	MutatedRange behaves like StaticRange, in that it does not validate the starting anchor is
  * 	before the ending anchor; the range will not move or collapse as the DOM is mutated. However,
- * 	when altering the range, it will usually need to traverse the DOM so the DOM must accurate.
- * 	You can use `setStart()` or `setEnd()` with `collapse=false` to set the anchors directly
- * 	and avoid DOM traversal.
+ * 	when altering the range, it will usually need to traverse the DOM so the DOM. You can use
+ * 	`setStart()` or `setEnd()` with `collapse=false` to set the anchors directly and avoid DOM
+ * 	traversal.
  * 
  * 	The range is defined by a fixed starting and ending anchor node. Mutations come after the
  * 	starting anchor, and before the ending anchor. A node itself bounds nested child nodes, and so
- * 	has an opening and closing boundary; you can specify whether the anchor is in reference
- * 	to this open or closing boundary. Note that you *can* specify the opening/closing boundary
- * 	for CharacterData nodes, even though they cannot have children; since CharacterData is a
- * 	Node, and so has childNodes and related interfaces, it seems better to keep consistent
- * 	Node handling throughout even if some nodes like CharacterData or certain HTMLElements
- * 	happen to disallow children. For these nodes, its recommended to expand the range to include
- * 	that element. The `normalize()` method will perform this expansion for CharacterData nodes,
- * 	but others like certain HTMLElements, you will need to do the expansion yourself. Note
- * 	that when converting to/from a Range/StaticRange object, the range is expanded automatically
- * 	to include CharacterData nodes; this is because Range/StaticRange use a text
- * 	offset for these nodes, which MutatedRange does not support.
+ * 	has an opening and closing boundary (e.g. an element's opening/closing tag); you can specify
+ * 	whether the anchor is in reference to this open or closing boundary. Note that you *can* specify
+ * 	the opening/closing boundary for CharacterData nodes, even though they cannot have children;
+ * 	since CharacterData is a Node, and so has childNodes and related interfaces, it seems better to
+ * 	keep consistent Node handling throughout even if some nodes like CharacterData or certain
+ * 	HTMLElements happen to disallow children. For these nodes, its recommended to expand the range
+ * 	to include that element. The `normalize()` method will perform this expansion for CharacterData
+ * 	nodes, but others like certain HTMLElements, you will need to do the expansion yourself. Note
+ * 	that when converting to/from a Range/StaticRange object, the range is expanded automatically to
+ * 	include CharacterData nodes; this is because the meaning of Range/StaticRange's offset changes
+ * 	when using CharacterData's, in this case specifying a text offset into its data. MutatedRange
+ * 	does not encode data offsets, so the text offset is undefined.
  * 
  * 	@member {Node} after Mutations follow this node's opening or closing bounds
  *  @member {Boolean} after_close Whether mutations follow the closing bounds (true, children are not mutated)
