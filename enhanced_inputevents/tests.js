@@ -1,5 +1,15 @@
 import { MutatedRange } from "./mutated_range.js";
 import { MutationDiff } from "./mutation_diff.js";
+
+var output_el, toggle_el;
+var should_stop = null;
+
+function force_redraw(){
+	return new Promise((resolve) => {
+		setTimeout(resolve, 0);
+	});
+}
+
 // Helpers for DOM creation
 let uid = 0;
 function node(){
@@ -158,13 +168,16 @@ class Tester{
 		});
 		this.verbose && console.log("starting, original:\n", this.dom_original.pretty_print());
 	}
+	/** Force records to be tracked */
+	flush(){
+		this.record(this.observer.takeRecords());
+	}
 	/** Start tracking/observing previously set root */
 	stop(){
-		this.record(this.observer.takeRecords());
+		this.flush();
 		this.observer.disconnect();
 	}
-	/** Try reverting and see if it works */
-	check_revert(name){
+	revert(){
 		this.dom_mutated = new CachedDOM(this.root);
 		this.verbose && console.log("stopping, mutated:\n", this.dom_mutated.pretty_print());
 		this.mutated = this.tracker.mutated(this.root);
@@ -172,8 +185,11 @@ class Tester{
 		this.tracker.revert();
 		this.dom_reverted = new CachedDOM(this.root);
 		this.verbose && console.log("stopped, reverted:\n", this.dom_reverted.pretty_print());
+	}
+	/** Try reverting and see if it works */
+	check_revert(name){
 		// check mutated
-		if (true){
+		try{
 			let fdiff = this.dom_original.diff(this.dom_mutated);
 			if (this.mutated != !!fdiff){
 				console.error(fdiff);
@@ -211,14 +227,21 @@ class Tester{
 					throw Error("range is incorrect");
 				}
 			}
+			// check revert
+			let rdiff = this.dom_original.diff(this.dom_reverted);
+			if (rdiff){
+				console.error(rdiff);
+				throw Error("revert failed");
+			}
+			let msg = `test ${name} passed`;
+			console.log(msg);
+			output_el.className = "good";
+			output_el.textContent = msg;
+		} catch(err){
+			output_el.className = "bad";
+			output_el.textContent = err.message;
+			throw err;
 		}
-		// check revert
-		let rdiff = this.dom_original.diff(this.dom_reverted);
-		if (rdiff){
-			console.error(rdiff);
-			throw Error("revert failed");
-		}
-		console.log(`test ${name} passed`)
 	}
 }
 
@@ -341,8 +364,10 @@ function randomized_tests({
 			console.log((new CachedDOM(r)).pretty_print(1))
 		console.log("}")
 	}
-	let test = new Tester(verbose);
-	for (let iter=0; iter<sample_count; iter++){
+	let test = new Tester(false); // verbose false, we'll do our own logging here
+	let iter = 0;
+	// single test
+	function single_test(){
 		const seed = random.getSeed()
 		verbose && console.log(`random test sample ${iter}, seed:`, seed);
 		// reset DOM
@@ -428,67 +453,121 @@ function randomized_tests({
 					node[ops[op]](...insert);				
 					if (verbose && started)
 						log_full("op");
+					test.flush();
 				}
 			}
-			log_full("stop");
 			test.stop();
-			test.check_revert(`random_sample_${iter}`);
+			log_full("stop");
+			test.revert();
 			log_full("revert");
+			test.check_revert(`random_sample_${iter}`);
 		} catch(err){
 			console.error("Random test failed with seed:", seed);
 			console.error(err);
 			throw err;
 		}
 	}
+	// run in batches so it doesn't freeze browser
+	return new Promise((resolve, reject) => {
+		function batch_test(){
+			const batch_size = 50;
+			const end = Math.min(iter+batch_size, sample_count);
+			for (; iter<end; iter++)
+				single_test();
+			if (should_stop || end === sample_count)
+				resolve();
+			else setTimeout(batch_test, 0); 
+		}
+		batch_test();
+	});
 }
 
-document.addEventListener("DOMContentLoaded", e => {
+window.toggle_running = async function(btn){
+	// stop
+	if (should_stop === false){
+		should_stop = true;
+		return;
+	}
+	// start
+	should_stop = false;
+	toggle_el.textContent = "Stop Tests";
+	await force_redraw();
+
+	// manual cases first
 	const t = new Tester();
 	let root = node();
-	let [A,B,C] = nodes(3);
+	let [A,B,C,D] = nodes(4);
 	root.append(A,B,C);
 
-	/*/ test 1
+	//*/ test 1
 	t.start(root);
 	root.append(A); // BCA
 	root.prepend(C); // CBA
 	root.prepend(B); // BCA
 	t.stop();
+	t.revert();
 	t.check_revert(1);
 	//*/
 
-	/*/ test 2
+	//*/ test 2
 	t.start(root);
 	root.append(A); // BCA
 	root.append(B); // CAB
 	root.append(C); // ABC
 	t.stop();
+	t.revert();
 	t.check_revert(2);
 	//*/
 
-	/*/ test 3
+	//*/ test 3
 	t.start(root);
 	root.append(A); // BCA
 	root.append(B); // CAB
 	C.remove(); // AB
 	t.stop();
+	t.revert();
 	t.check_revert(3);
 	//*/
 
-	//*
-	
-	random.setSeed(402117071, -1746714304, 1101306980, -1985325453);
-	// random.randomSeed();
-	randomized_tests({
-		sample_count: 1,
-		element_count: 4,
-		text_count: 3,
-		data_count: 3,
-		init_op_count: 3,
-		op_count: 4,
-		insert_max: 3,
+	//*/ deferred test 1
+	C.remove();
+	t.start(root);
+	C.append(A);
+	C.append(D);
+	C.append(B);
+	root.append(C);
+	D.remove();
+	t.stop();
+	t.revert();
+	t.check_revert("defer 1")
+	//*/
+
+	//* random tests
+	const seed = null;
+	!seed ? random.randomSeed() : random.setSeed(seed);
+	await randomized_tests({
+		sample_count: !seed ? 500 : 1,
+		element_count: 50,
+		text_count: 50,
+		data_count: 12,
+		init_op_count: 15,
+		op_count: 50,
+		insert_max: 20,
 		prop_chance: .15,
-		verbose: true
+		verbose: !!seed
 	})
 	//*/
+
+	if (should_stop)
+		console.log("tests stopped early!");
+
+	// tests complete
+	toggle_el.textContent = "Start Tests";
+	output_el.textContent = should_stop ? "tests stopped" : "tests complete";
+	should_stop = null;
+}
+
+document.addEventListener("DOMContentLoaded", e => {
+	toggle_el = document.querySelector("button");
+	output_el = document.querySelector("output");	
 });

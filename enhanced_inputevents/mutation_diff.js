@@ -1,5 +1,7 @@
 import { MutatedRange } from "./mutated_range.js";
 
+let DBG = 0;
+
 /** Tracks mutations performed on the DOM, giving you the delta between original and mutated
  * 	DOM, allowing DOM to be reverted to its initial state, or a Range to be queried with the
  * 	extent of DOM mutations.
@@ -197,6 +199,7 @@ export class MutationDiff{
 	}
 
 	// bitmask definitions for `diff()`
+	// TODO: move this out to a frozen object?
 	static ALL			= 0xFFFF;
 	static MUTATED		= 0b10000;
 	static ORIGINAL		= 0b100000;
@@ -432,8 +435,10 @@ export class MutationDiff{
 				const next_set = !(g.next === undefined || g.next instanceof SiblingPromise);
 				if (!next_set){
 					const prev_set = !(g.prev === undefined || g.prev instanceof SiblingPromise);
-					if (!prev_set)
+					if (!prev_set){
+						console.warn("MutationDiff: siblings unknown, can't patch")
 						continue;
+					}
 				}
 				add.push({group: g, next: next_set});
 			}
@@ -563,6 +568,7 @@ class PropertyCache{
 		else{
 			const dirty = value !== props.value;
 			if (dirty != props.dirty){
+				props.dirty = dirty;
 				const change = dirty ? 1 : -1;
 				this._dirty += change;
 				this._clean -= change;
@@ -608,8 +614,11 @@ class PropertyCache{
 /** Container to encapsulate mutations to the DOM tree (node adds/removes) */
 class TreeMutations{
 	constructor(){
+		/** @member {Map<Node, MutatedNode>} floating index of nodes that have been modified */
 		this.floating = new Map(); // node => MutatedNode
+		/** @member {SiblingIndex} original indexes the graph of MutatedNode original siblings */
 		this.original = new SiblingIndex("original");
+		/** @member {SiblingIndex} original indexes the graph of MutatedNode mutated siblings */
 		this.mutated = new SiblingIndex("mutated");
 	}
 
@@ -657,10 +666,42 @@ class TreeMutations{
 		// MutatedNode for prev/next; undefined if it doesn't exist
 		let prev_mn, next_mn;
 
+		/* An operation may mean one or more nodes have returned to their original position, e.g.
+			they have transitioned from floating to fixed. The "reverted" nodes may be beyond
+			prev/next, even if no nodes could be reverted inside that range. Some cases that require
+			checking for reverted nodes:
+			1. A node was removed that belonged to parent; the node may have been in-between a node
+			  and its original sibling; this could occur even if the removed node was previously
+			  fixed itself, e.g. B[A][C], with A/C fixed, removing A makes B fixed.
+			2. Unknown siblings become known:
+				[fixed, prev, unknown sibling, next, floating (but should be fixed)]
+			  The floating node could not finish its revert check since the unknown sibling prevented
+			  us from linking it with the fixed node. Necessarily in this case, floating will be the
+			  next floating node belonging to parent.
+			3. A node was added that belonged to parent; the added node could become fixed
+			4. A node that is inside its original parent, and its original sibling was a
+			  SiblingPromise (unknown) that was just resolved. An example:
+			  	[origin, prev, SiblingPromise->, next, floating, fixed original]
+			  As in this example, the resolved node may be outside the prev/next range, meaning it
+			  may not get caught in the prev/next revert check.
+
+			For first two, fixedness can be propagated from the nearest floating node beyond
+			prev/next. The third case we can propagate from the prev/next range. The fourth case,
+			we'd need to propagate from each promise origin individually.
+		*/
+		// if removal/resolve allows continuation of a revert calculation (case #1)
+		let revert_possible = false;
+		// siblings became known (case #2)
+		let siblings_known = false;
+		// MutatedNode's between prev/next that may have returned to their original position (case #3)
+		const candidates = [];
+		// resolved promise (case #4); {MutatedNodes => 0b00 bit flag for reversion, see below}
+		const resolved = new Map();
+
 		/* The current DOM state has been revealed between prev and next, so we can resolve
 			any SiblingPromise's that are inside that range. We'll remove any inner nodes at
 			the same time. Even if there added/removed are empty, we can still resolve promises
-			for prev/next.
+			for prev/next (indicated by `revert_possible` flag)
 		*/
 		// last seen fixed node and mutated.next SiblingPromise
 		let last_fixed, last_promise;
@@ -675,31 +716,46 @@ class TreeMutations{
 			let mn;
 			if (node && (mn = this.floating.get(node))){
 				const m = mn.mutated;
-				if (m){
-					// case: remove + untracked add + remove;
-					// mark any sibling promises that need to be resolved
-					if (handle_prev && m.prev instanceof SiblingPromise){
-						// joint resolve: promise -> <- promise
-						if (last_promise){
-							last_promise.resolve(m.prev.origin);
-							m.prev.resolve(last_promise.origin);
-							last_promise = null;
+				// case: remove + untracked add + remove;
+				// mark any sibling promises that need to be resolved
+				if (handle_prev){
+					if (m){
+						if (m.prev === undefined)
+							siblings_known = true;
+						else if (m.prev instanceof SiblingPromise){
+							// joint resolve: promise -> <- promise
+							if (last_promise){
+								last_promise.resolve(m.prev.origin, resolved);
+								m.prev.resolve(last_promise.origin, resolved);
+								resolved.set(last_promise.mn, 0);
+								resolved.set(m.prev.mn, 0);
+								last_promise = null;
+							}
+							// resolve: fixed node <- promise
+							else if (last_fixed !== undefined){
+								m.prev.resolve(last_fixed, resolved);
+								resolved.set(m.prev.mn, 0);
+							}
+							// resume: floating node <- first promise;
+							// only occurs with the first promise we see, so promise continues with prev_mn
+							else if (m.prev.resume(prev_mn))
+								resolved.set(m.prev.mn, 0);
 						}
-						// resolve: fixed node <- promise
-						else if (last_fixed !== undefined)
-							m.prev.resolve(last_fixed);
-						// resume: floating node <- first promise;
-						// only occurs with the first promise we see, so promise can continue with prev_mn
-						else m.prev.resume(prev_mn);
 					}
-					if (handle_next){
-						if (m.next instanceof SiblingPromise)
+				}
+				if (handle_next){
+					if (m){
+						if (m.next === undefined)
+							siblings_known = true;
+						else if (m.next instanceof SiblingPromise)
 							last_promise = m.next;
 					}
-					// resume: last promise -> floating node
-					// only occurs with the last promise we see, so mn will necessarily become next_mn
-					else if (last_promise)
-						last_promise.resume(mn);
+				}
+				// resume: last promise -> floating node
+				// only occurs with the last promise we see (next_mn will be set to mn after we return)
+				else if (last_promise){
+					if (last_promise.resume(mn))
+						resolved.set(last_promise.mn, 0);
 				}
 			}
 			else{
@@ -707,12 +763,11 @@ class TreeMutations{
 				// resolve: promise -> fixed node
 				if (last_promise){
 					last_promise.resolve(node);
+					resolved.set(last_promise.mn, 0);
 					last_promise = null;
 				}
 			}
 			return mn;
-
-			// TODO: need to do revert check on each resolved promise.origin individually
 		};
 
 		const fixed = [];
@@ -725,8 +780,12 @@ class TreeMutations{
 				// case: add + remove; ops cancel out
 				if (!mn.original)
 					this.floating.delete(node);
-				// case: (remove + add)* + remove
-				else mn.mutated = null;
+				else{
+					// case: (remove + add)* + remove
+					mn.mutated = null;
+					if (mn.original.parent === parent)
+						revert_possible = true;
+				}
 			}
 			// (fixed) newly removed
 			else{
@@ -735,9 +794,24 @@ class TreeMutations{
 				mn.original = {parent};
 				fixed.push(mn);
 				this.floating.set(node, mn);
+				revert_possible = true;
 			}
 		}
 		next_mn = handle_promises(next, true, false);
+		if (resolved.size)
+			siblings_known = true;
+		// if we know there is another unknown sibling that would stop the revert check again
+		if (siblings_known && prev_mn?.mutated?.prev === undefined && next_mn?.mutated?.next === undefined)
+			siblings_known = false;
+
+		// filter out resolved promises that are known to be in incorrect position
+		for (const mn of resolved.keys()){
+			// we do this after removal step, so now any removed nodes will be filtered out as well;
+			// (no need to do revert checks on nodes that are being removed)
+			// necessarily original.parent === parent
+			if (mn.mutated?.parent !== parent)
+				resolved.delete(mn);
+		}
 
 		// get original siblings to mark original position for newly removed nodes
 		if (fixed.length){
@@ -769,8 +843,8 @@ class TreeMutations{
 				// original sibling(s) were removed from in between fprev-fnext
 				const sibling = this.original.prev.get(fprev.node);
 				if (sibling){
-					fprev.original.next = sibling;
-					fnext.original.prev = this.original.next.get(fnext.node);
+					fprev.original.next = sibling.node;
+					fnext.original.prev = this.original.next.get(fnext.node).node;
 				}
 				// fprev-fnext are eachother's original sibling
 				else{
@@ -784,27 +858,14 @@ class TreeMutations{
 			this.original.add(fprev);
 		}
 
-		// MutatedNode's that may have returned to their original position
-		const candidates = [];
-		/** Marks new mutated sibling for prev/next
-		 * @param {MutatedNode | undefined} mn the mutated node for prev/next
-		 * @param {Node | null} sibling the new (mutated) sibling
-		 * @param {"prev" | "next"} dir which sibling to set
-		 */
-		const update_edge = (mn, sibling, dir) => {
-			if (!mn) return;
-			this.mutated.update(mn, sibling, dir, parent);
-			/* Position may be reverted in several cases, such as:
-				- original SiblingPromise got resolved
-				- incorrect sibling got removed
-				- sibling got added and opposite side was fixed
-				We can specify more specific conditions for becoming a candidate than what
-				we have here, but I don't think it will speed things up by much.
-			*/
-			if (mn.original?.parent === parent)
-				candidates.push(mn);
-		};
-		update_edge(prev_mn, added[0] || next, "next");
+		/* Added nodes may overwrite the sibling relationship from next/prev. Since update() doesn't
+			check for overwrite scenarios, at the very least you need to disconnect their sibling
+			first. We'll just do the update first and that takes care of it
+		*/
+		if (prev_mn)
+			this.mutated.update(prev_mn, added[0] || next, "next", parent);
+		if (next_mn)
+			this.mutated.update(next_mn, added[added.length-1] || prev, "prev", parent);
 		if (added.length){
 			for (let ai=0; ai<added.length; ai++){
 				const node = added[ai];
@@ -828,108 +889,234 @@ class TreeMutations{
 				this.mutated.add(mn);
 			};
 		}
-		update_edge(next_mn, added[added.length-1] || prev, "prev");
 
-		/* Check if these nodes have returned to original position (floating to fixed);
-			when checking fixedness, we ignore all nodes that would get moved to a different parent.
+		/* Optimizing many repeated revert_checks: Perhaps an optimal method would be to walk through
+			the nodes in order; but that's not possible since our sibling graph could be incomplete.
+			Some other ideas:
+			1. If we see a sibling is incorrect, we could mark the direction; if a revert check comes
+				in from the other direction, we know not to continue. Continuing would just traverse
+				until it found that fixed node from the original direction, the number of floating
+				nodes in between is probably small, so this may not help much. Overhead is high since
+				we need to do the check for every traversal.
+			2. Same as previous bullet, but assume the sibling is a candidate for another revert
+			    check. We can set prev/next (depending on direction) to be undefined to skip a side,
+			    or possibly the entire revert_check. Less overhead, though still fair amount; but
+				this time I think it may be worth it. You need to remove reverted nodes from your
+				list anyways, so we can just do the side-skipping logic at the same time.
+			I've implemented the second idea.
+
+			Doing revert check on `resolved` promises first may be slightly more efficient: they will
+			be outside (prev, next) range, so would more often provide a fixed node for
+			`candidates`. But that comes at needing to trim `candidates`, or to just do a revert
+			check from one side; add to that the case where candidates is empty. Logic will be
+			complicated and may cancel out any benefits. So I'm just checking candidates first
+			instead since it will be simpler.
 		*/
-		revert_check: if (candidates.length){
-			// to become fixed there must be a fixed anchor we attach to on at least one side
-			/** Search for a fixed node anchor on one side of `candidates`
-			 * @param {MutatedNode | undefined} mn the mutated node to start searching from
-			 * @param {Node | null} node if `mn` is not set, this gives a known fixed anchor
-			 * @param {"next" | "prev"} dir direction to search for an anchor
-			 */
-			const fixed_anchor = (mn, node, dir) => {
-				if (!mn)
-					return {fixed: node};
-				while (true){
-					// this can become another candidate
-					if (mn.original?.parent === parent)
-						return {floating: mn};
-					// can't traverse further; revert check is deferred until more siblings are known
-					let sibling;
-					if (!mn.mutated || (sibling = mn.mutated[dir]) === undefined || sibling instanceof SiblingPromise)
-						return;
-					// fixed node found
-					if (sibling === null || !(mn = this.floating.get(sibling)))
-						return {fixed: sibling};
-					// otherwise, a floating node that originated in another parent; we skip it
-				}
-			};
-			/** Propagate fixedness to `candidates` from one direction
-			 * @param {Node | null} fixed a fixed node found from `fixed_anchor()`
-			 * @param {Number} idx where to propagating in candidates
-			 * @param {Number} end_idx where to end propagation in candidates
-			 * @param {"next" | "prev"} forward_dir direction to propagate
-			 * @param {"prev" | "next"} backward_dir opposite of `forward_dir`
-			 * @param {Boolean} extend if we propagate to all candidates, whether we should traverse
-			 * 	the mutated sibling graph to propagate further
-			 * @returns {Number | null} null if we propagated to all candidates; otherwise,
-			 * 	the idx we stopped at and did not mark as fixed
-			 */
-			const propagate = (fixed, idx, end_idx, forward_dir, backward_dir, extend) => {
-				let mn;
-				// mark node as fixed and remove from the graph 
-				const mark_fixed = (mn) => {
-					fixed = mn.node;
-					this.floating.delete(fixed);
-					this.original.remove(mn);
-					this.mutated.remove(mn);
-				}
-				// first propagate to candidates (known to be in correct parent)
-				const inc = Math.sign(end_idx-idx);
-				do {
-					mn = candidates[idx];
+		// removes reverted nodes so we don't check them again; sets side-skipping flags
+		const mark_reverted = (mn, reverted, side) => {
+			let flags = resolved.get(mn);
+			if (flags === undefined)
+				return;
+			/* Revert check flags:
+				0b01 = prev sibling is known to be incorrect
+				0b10 = next sibling is known to be incorrect
+				if 0b11, both siblings are incorrect, so no need to do a revert check
+			*/
+			if (reverted || (flags &= side === "prev" ? 1 : 2) == 3)
+				resolved.delete(mn);
+			else resolved.set(mn, flags);
+		};
+		if (revert_possible || siblings_known || candidates.length)
+			this.#revert_check(candidates, parent, mark_reverted, prev_mn || prev, next_mn || next);
+		for (const [mn, flags] of resolved.entries())
+			this.#revert_check([mn], parent, mark_reverted, flags & 1 ? mn : undefined, flags & 2 ? mn : undefined);
+
+
+		try{
+			++DBG;
+			this.#assert_valid_state();
+			// let found = false;
+			// for (let x of this.floating.values())
+			// 	if (x.node instanceof Text && x.node.uid == 29)
+			// 		found = x.mutated?.parent;
+			// console.log("text29 found:", found, ++DBG);
+		} catch(err){
+			console.log("iter #", DBG);
+			console.error("invalid graph");
+			throw err;
+		}
+	}
+
+	/** Check if these nodes have returned to original position (floating to fixed). To become fixed
+	 *  its neighboring sibling that originated from the same parent must match its original sibling
+	 *  (this ignores siblings in between originating from a different parent). If a node becomes
+	 *  fixed, it may cause its neighbors to become fixed in a propagating chain.
+	 * @param {[MutatedNode]} candidates list of adjacent MutatedNode's, all inside their original
+	 * 	parent, and who are candidates to become fixed. Can be empty, in which case prev/next must
+	 * 	be specified to direct where to search.
+	 * @param {Node} parent parent container for which all candidates originated and are presently inside
+	 * @param cbk `fn(MutatedNode, reverted: Boolean, side: prev/next)` callback, optional, to be
+	 * 	called whenever a MutatedNode is reverted or could not be reverted due to incorrect sibling
+	 * 	on one of its sides
+	 * @param {MutatedNode | Node | null | undefined} prev hints about a fixed node on the
+	 *  previousSibling side of candidates:
+	 *  - `MutatedNode`: We are not sure if there is a fixed anchor on this side of candidates, but
+	 *      we can start searching for one here. However, if this node has been added to
+	 *      `candidates` (first/last node) it signals that we know there is no valid fixed anchor on
+	 *      that side, but the MutatedNode could become fixed if an anchor is found on the other side 
+	 * 	- `Node` or `null`: we know this is the fixed anchor
+	 *  - `undefined`: no info on fixed anchors; look for one starting with the siblings of
+	 * 		`candidates
+	 * @param {MutatedNode | Node | null | undefined} next same as `prev`, only a nextSibling
+	 */
+	#revert_check(candidates, parent, cbk, prev, next){
+		/** Search for a fixed node anchor on one side of `candidates`
+		 * @param {MutatedNode | Node | null | undefined} mn where to start the search:
+		 * 	- `MutatedNode`: start search with this node, inclusive
+		 * 	- `Node` or `null`: assumes this is the fixed anchor
+		 * 	- `undefined`: falls back to using `exclusive` as the start
+		 * @param {MutatedNode} exclusive start of search, but not including this node
+		 * @param {"next" | "prev"} dir direction to search for an anchor
+		 */
+		const fixed_anchor = (mn, exclusive, dir) => {
+			// caller knows there is no fixed anchor, and has added the nearest
+			// floating sibling to candidates already
+			if (mn === exclusive)
+				return;
+			// caller gave us the fixed anchor, no need to search for it
+			if (mn === null || mn instanceof Node)
+				return {fixed: mn};
+			// caller has no info on fixed anchor; search, starting with sibling of exclusive
+			if (mn === undefined)
+				mn = exclusive
+			// caller knows to start looking for fixed anchor with this node
+			else if (mn.original?.parent === parent)
+				return {floating: mn};
+			while (true){
+				// can't traverse further; revert check is deferred until more siblings are known
+				/* Originally I thought [origin, SibingPromise->] scenario indicates a revert,
+					as it appears origin has returned to its original position. A counter example
+					for this is: (lower case = mutated sibling unknown, * = SiblingPromise)
+			  			[AxyzB] -> [x*yzB] -> [Bx*y*z] -> [BAx*y*z]
+			        B remains fixed throughout; when A is moved before x*, we see the SiblingPromise
+			  		and assume A has returned to its original position. While its relative position
+					to the SiblingPromise is reverted, the shift in the other nodes (namely B),
+					means that relative position is no longer its original position.
+				*/
+				let sibling;
+				if (!mn.mutated || (sibling = mn.mutated[dir]) === undefined || sibling instanceof SiblingPromise)
+					return;
+				// fixed node found
+				if (sibling === null || !(mn = this.floating.get(sibling)))
+					return {fixed: sibling};
+				// skip floating node that originated in another parent;
+				// otherwise, it can become another candidate
+				if (mn.original?.parent === parent)
+					return {floating: mn};
+			}
+		};
+		/** Propagate fixedness to `candidates` from one direction
+		 * @param {Node | null | SiblingPromise} fixed a fixed node found from `fixed_anchor()`
+		 * @param {Number} idx where to start propagating in candidates
+		 * @param {Number} end_idx where to end propagation in candidates, can be < idx
+		 * @param {"next" | "prev"} forward_dir direction to propagate
+		 * @param {"prev" | "next"} backward_dir opposite of `forward_dir`
+		 * @param {Boolean | MutatedNode | Node | null} extend how to handle propagation beyond
+		 * 	candidates, can be one of:
+		 * 	- `false`: do not propagate beyond candidates
+		 * 	- `true`: continue propagating with the sibling of the end_idx candidate
+		 * 	- `MutatedNode`: continue propagation starting with this node (inclusive)
+		 * 	- `Node` or `null`: do not propagate further (caller found a fixed node)
+		 * @returns {Number | null} null if we propagated to all candidates; otherwise,
+		 * 	the idx we stopped at and did not mark as fixed
+		 */
+		const propagate = (fixed, idx, end_idx, forward_dir, backward_dir, extend) => {
+			let mn;
+			// mark node as fixed and remove from the graph 
+			const mark_fixed = () => {
+				fixed = mn.node;
+				this.floating.delete(fixed);
+				this.original.remove(mn);
+				this.mutated.remove(mn);
+				// cleanup any promises (they may have references in another node's mutated sibling);
+				// no promise in backward direction, since that's what matched the fixed ref
+				const fp = mn.original[forward_dir];
+				if (fp instanceof SiblingPromise)
+					fp.discard();
+				// callback
+				if (cbk) cbk(mn, true);
+			}
+			// first propagate to candidates (known to be in correct parent)
+			const inc = Math.sign(end_idx-idx);
+			for (; idx != end_idx; idx += inc){
+				mn = candidates[idx];
+				// incorrect sibling?
+				if (mn.original[backward_dir] !== fixed){
+					// callback
+					if (cbk) cbk(mn, false, backward_dir);
 					// can try from other side instead
-					if (mn.original[backward_dir] !== fixed)
-						return idx;
-					mark_fixed();
-				} while ((idx += inc) != end_idx);
-				// all candidates reverted; propagate beyond if there may be nodes to revert there
-				if (extend){
-					outer: while (true){
-						// filter out nodes which are not in the correct parent
-						do {
-							const sibling = mn.mutated[forward_dir];
-							// sibling is unknown or fixed
-							if (!sibling || sibling instanceof SiblingPromise || !(mn = this.floating.get(sibling)))
-								break outer;
-						} while (mn.original?.parent !== parent);
-						if (mn.original[backward_dir] !== fixed)
-							break;
+					return idx;
+				}
+				mark_fixed();
+			}
+			// all candidates reverted; propagate beyond if there may be nodes to revert there
+			outer: if (extend !== false){
+				// caller gave a hint as to where to start the propagation
+				if (extend !== true){
+					mn = extend;
+					// other side is a fixed node (prev undefined is an invalid arg for this scenario)
+					if (!(mn instanceof MutatedNode))
+						break outer;
+					// inclusive
+					if (mn.original?.parent === parent){
+						if (mn.original[backward_dir] !== fixed){
+							// callback
+							if (cbk) cbk(mn, false, backward_dir);
+							break outer;
+						}
 						mark_fixed();
 					}
 				}
-				return null;
-			};
-
-			// propagate next
-			let next_end_idx = null;
-			let anchor = fixed_anchor(next_mn, next, "next");
-			if (anchor){
-				// fixed anchor found
-				if (!anchor.floating){
-					next_end_idx = propagate(anchor.fixed, candidates.length-1, -1, "prev", "next", true);
-					if (next_end_idx === null)
-						break revert_check;
+				while (true){
+					// filter out nodes which are not in the correct parent
+					do {
+						const sibling = mn.mutated[forward_dir];
+						// sibling is unknown or fixed
+						if (!sibling || sibling instanceof SiblingPromise || !(mn = this.floating.get(sibling)))
+							break outer;
+					} while (mn.original?.parent !== parent);
+					if (mn.original[backward_dir] !== fixed){
+						// callback
+						if (cbk) cbk(mn, false, backward_dir);
+						break;
+					}
+					mark_fixed();
 				}
-				// floating node can be a candidate when propagating from prev side
-				else candidates.push(anchor.floating);
 			}
-			// propagate prev
-			anchor = fixed_anchor(prev_mn, prev, "prev");
-			if (anchor && !anchor.floating){
-				const extend = next_end_idx === null;
-				propagate(anchor.fixed, 0, extend ? candidates.length : next_end_idx+1, "next", "prev", extend);
-			}
-		}
+			return null;
+		};
 
-		try{
-			this.#assert_valid_graph();
-		} catch(err){
-			console.error("invalid graph");
-			throw err;
+		// propagate next
+		let next_end_idx = null;
+		let anchor = fixed_anchor(next, candidates[candidates.length-1], "next");
+		if (anchor){
+			// fixed anchor found
+			if (!anchor.floating){
+				next_end_idx = propagate(anchor.fixed, candidates.length-1, -1, "prev", "next", prev === undefined ? true : prev);
+				if (next_end_idx === null)
+					return;
+			}
+			// floating node can be a candidate when propagating from prev side
+			else candidates.push(anchor.floating);
+		}
+		if (!candidates.length)
+			return;
+		// propagate prev
+		anchor = fixed_anchor(prev, candidates[0], "prev");
+		if (anchor && !anchor.floating){
+			// guaranteed at least one candidate when extend is true
+			const extend = next_end_idx === null;
+			propagate(anchor.fixed, 0, extend ? candidates.length : next_end_idx+1, "next", "prev", extend);
 		}
 	}
 
@@ -1080,7 +1267,7 @@ class TreeMutations{
 		}
 
 		try{
-			this.#assert_valid_graph();
+			this.#assert_valid_state();
 		} catch(err){
 			console.error("invalid graph after synchronization");
 			throw err;
@@ -1088,7 +1275,9 @@ class TreeMutations{
 	}
 
 	// for debugging only
-	#assert_valid_graph(){
+	#assert_valid_state(){
+		const promises = new Map();
+		// check SiblingIndex's
 		for (const mn of this.mutations()){
 			for (const mode of ["original","mutated"]){
 				const g = this[mode];
@@ -1096,16 +1285,88 @@ class TreeMutations{
 				if (!mnm) continue;
 				for (const dir of ["prev","next"]){
 					const mval = mnm[dir];
+					// correct type (e.g. not MutatedNode)
+					if (!(mval === null || mval === undefined || mval instanceof SiblingPromise || mval instanceof Node))
+						throw Error("incorrect sibling type");
 					const gval = g[dir].get(mval);
+					// save promises for checking them later
+					if (mval instanceof SiblingPromise){
+						let store = promises.get(mval);
+						if (store === undefined){
+							store = {mutated: [], original: []};
+							promises.set(mval, store);
+						}
+						store[mode].push(mn);
+					}
+					// these don't get indexed
 					if (!mval || mval instanceof SiblingPromise){
 						if (gval !== undefined)
 							throw Error("null/SiblingPromise sibling is being indexed")
 					}
-					else if (gval !== mn)
+					// index correct?
+					else if (gval !== mn){
+						console.error("sibling lookup:", mode, dir)
+						console.error(mn);
+						console.error("expected:", mn.node);
+						console.error("received:", gval ? gval.node : gval);
 						throw Error("indexed sibling doesn't match MutatedNode");
+					}
 				}
-
 			}
+		}
+		// check promises are valid
+		for (const [promise, refs] of promises.entries()){
+			try{
+				if (!(promise.ptr instanceof MutatedNode))
+					throw Error("promise pointer is not MutatedNode");
+				if (!refs.mutated.length)
+					throw Error("promise doesn't have a mutated pointer");
+				if (refs.mutated.length > 1)
+					throw Error("promise has multiple mutated pointers");
+				if (promise.ptr !== refs.mutated[0])
+					throw Error("promise pointer is incorrect");
+				if (!refs.original.length)
+					throw Error("promise origin was resolved, but pointer still set");
+				if (refs.original.length > 1)
+					throw Error("promise has multiple origins");
+			} catch(err){
+				console.error(promise);
+				console.error(refs);
+				throw err;
+			}
+		}
+		// check that reverts have all been performed
+		const check_anchor = (smn, dir) => {
+			const node = smn.node;
+			const parent = smn.original.parent;
+			const target = smn.original[dir];
+			let sibling = smn.mutated[dir];
+			while (true){
+				smn = this.floating.get(sibling);
+				// fixed found
+				if (!smn){
+					if (target === sibling){
+						console.error(node, "has sibling", target);
+						throw Error("node position is reverted");
+					}
+					// wrong sibling
+					return;
+				}
+				// sibling is not fixed
+				if (smn.original?.parent === parent)
+					return;
+				// can't traverse to get a fixed anchor
+				sibling = smn.mutated?.[dir];
+				if (sibling === undefined || sibling instanceof SiblingPromise)
+					return;
+			}
+		}
+		for (const mn of this.mutations()){
+			// candidate for being reverted?
+			if (!mn.mutated || !mn.original || mn.mutated.parent !== mn.original.parent)
+				continue;
+			check_anchor(mn, "prev");
+			check_anchor(mn, "next");
 		}
 	}
 }
@@ -1144,9 +1405,14 @@ class SiblingPromise{
 	 * @param {"prev" | "next"} dir which sibling this promise is for
 	 */
 	constructor(tree, mn, dir){
+		/** @member {TreeMutations} tree pointer to containing tree */
 		this.tree = tree;
+		/** @member {MutatedNode} mn origin mutated node that is searching for its origina sibling */
 		this.mn = mn;
+		/** @member {"prev" | "next"} dir which sibling we're searching for */
 		this.dir = dir;
+		/** @member {MutatedNode | undefined} ptr the sibling traversal pointer; can be undefined if resolved immediately */
+		this.ptr;
 		// `resume_with` is used elsewhere to cache a node that we should resume search with
 	}
 	/** Node that is searching for its original siblings */
@@ -1161,8 +1427,8 @@ class SiblingPromise{
 			A<->B sibling relationship cannot be determined. So if B.prev is unknown, A.next will
 			also be unknown, meaning the traversal stops at A.next = SiblingPromise and B.prev =
 			SiblingPromise; neither A nor B knows the other, so the promises can't resolve each
-			other here. Instaed this gets resolved when a batch `mutation()` comes in, revealing
-			A<->B sibling relationship.
+			other here. This scenario is instead resolved inside a batch `mutation()`, which can
+			reveal a A<->B sibling relationship.
 		*/
 		// resolve: promise -> fixed (null)
 		if (node === null){
@@ -1181,22 +1447,33 @@ class SiblingPromise{
 			// we'll need to resume later when its sibling is revealed
 			if (!smn.mutated)
 				smn.mutated = {parent: this.mn.original.parent};
-			const sibling = smn.mutated[this.dir];
-			if (sibling === undefined){
+			node = smn.mutated[this.dir];
+			if (node === undefined){
 				smn.mutated[this.dir] = this;
+				this.ptr = smn;
 				return false;
 			}
 			// resolve: promise -> fixed (null)
-			if (sibling === null){
+			if (node === null){
 				this.resolve(null);
 				return true;
 			}
-			smn = this.tree.floating.get(sibling);
+			smn = this.tree.floating.get(node);
 		}
 	}
-	/** Original sibling found */
+	/** Original sibling found. You can optionally call discard to cleanup the pointer reference.
+	 * 	That should not be necessary for normal usage though, as promise resolution typically is
+	 * 	triggered by the pointer's sibling becoming known, and thus resuming the promise traversal;
+	 * 	so the pointer would cleaned up from the caller instead.
+	 * @param {Node | null} node the original sibling
+	 */
 	resolve(node){
 		this.tree.original.update(this.mn, node, this.dir);
+	}
+	/** Call this when you need to cleanup the promise pointer, e.g. when a node becomes reverted */
+	discard(){
+		if (this.ptr)
+			delete this.ptr.mutated[this.dir];
 	}
 }
 
